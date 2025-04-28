@@ -321,10 +321,15 @@ if page == "📊 종합 분석":
             ticker_proc = ticker.strip().upper()
             with st.spinner(f"{ticker_proc} 종합 분석 중..."): # <-- 분석 시작 스피너 (한 번만 사용)
                 try:
-                    # --- run_cached_analysis 한 번만 호출 ---
-                    results = run_cached_analysis(ticker_proc, NEWS_API_KEY, FRED_API_KEY, years, days, periods, cp_prior)
+                    # --- run_cached_analysis 한 번만 호출 (수정된 이름 사용) ---
+                    results = run_cached_analysis(
+                        ticker_proc,
+                        NEWS_API_KEY, # app.py에서 로드한 변수
+                        FRED_API_KEY, # app.py에서 로드한 변수
+                        years, days, periods, cp_prior
+                    )
 
-                    # --- 상세 결과 표시 로직 통합 (중복 제거됨) ---
+                    # --- 상세 결과 표시 로직 통합 ---
                     if results and isinstance(results, dict):
                         if "error" in results:
                             # 분석 함수 내부에서 오류 발생 시
@@ -335,14 +340,16 @@ if page == "📊 종합 분석":
 
                             # --- MAPE 경고 배너 삽입 ---
                             if results.get("warn_high_mape"):
-                                m = results.get("mape", 0.0)
+                                m = results.get("mape", "N/A") # MAPE 값 가져오기
+                                mape_value_str = f"{m:.1f}%" if isinstance(m, (int, float)) else "N/A"
                                 # 경고는 결과 영역 밖에 표시될 수 있도록 st 사용
                                 st.warning(
-                                    f"🔴 모델 정확도 낮음 (MAPE {m:.1f}%). 예측 신뢰도에 주의하세요!"
+                                    f"🔴 모델 정확도 낮음 (MAPE {mape_value_str}). 예측 신뢰도에 주의하세요!"
                                 )
                             # ------------------------------
 
-                            with results_placeholder: # 결과 영역 내에 상세 내용 표시
+                            # --- 결과 표시 영역 시작 ---
+                            with results_placeholder:
                                 st.header(f"📈 {ticker_proc} 분석 결과 (민감도: {cp_prior:.3f})")
 
                                 # 1. 요약 정보
@@ -423,10 +430,10 @@ if page == "📊 종합 분석":
                                     st.markdown("**📰 뉴스 감정 분석**")
                                     news_sentiment = results.get('news_sentiment', ["정보 없음."]) # 변수 할당
                                     if isinstance(news_sentiment, list) and len(news_sentiment) > 0:
-                                        st.info(news_sentiment[0])
+                                        st.info(news_sentiment[0]) # 헤더/요약 표시
                                         if len(news_sentiment) > 1:
                                             with st.expander("뉴스 목록 보기"):
-                                                for line in news_sentiment[1:]:
+                                                for line in news_sentiment[1:]: # 개별 뉴스 표시
                                                     st.write(f"- {line}")
                                     else:
                                         st.write(str(news_sentiment)) # 안전하게 문자열로 변환
@@ -436,7 +443,7 @@ if page == "📊 종합 분석":
                                     if isinstance(fng_index, dict):
                                         st.metric("현재 지수", fng_index.get('value', 'N/A'), fng_index.get('classification', ''))
                                     else:
-                                        st.write(fng_index)
+                                        st.write(fng_index) # 오류 메시지 등 표시
                                 st.divider()
 
                                 # 6. Prophet 주가 예측
@@ -457,10 +464,13 @@ if page == "📊 종합 분석":
                                         df_fcst['ds'] = pd.to_datetime(df_fcst['ds'])
                                         df_fcst_display = df_fcst.sort_values("ds").iloc[-10:].copy()
                                         df_fcst_display['ds'] = df_fcst_display['ds'].dt.strftime('%Y-%m-%d')
+                                        # Format yhat, yhat_lower, yhat_upper if they exist
+                                        format_dict_fcst = {}
+                                        for col in ['yhat', 'yhat_lower', 'yhat_upper']:
+                                            if col in df_fcst_display.columns:
+                                                format_dict_fcst[col] = "{:.2f}"
                                         st.dataframe(
-                                            df_fcst_display[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].style.format({
-                                                'yhat': "{:.2f}", 'yhat_lower': "{:.2f}", 'yhat_upper': "{:.2f}"
-                                            }),
+                                            df_fcst_display[['ds'] + list(format_dict_fcst.keys())].style.format(format_dict_fcst),
                                             use_container_width=True
                                         )
                                     except Exception as e:
@@ -469,48 +479,64 @@ if page == "📊 종합 분석":
                                 cv_plot_path = results.get('cv_plot_path')
                                 if cv_plot_path and os.path.exists(cv_plot_path):
                                     st.markdown("**📉 교차 검증 결과 (MAPE)**")
-                                    st.image(cv_plot_path, caption="MAPE (낮을수록 정확)")
-                                elif cv_plot_path is None and isinstance(forecast_data_list, list): # 예측은 성공했으나 CV 결과만 없을 때
+                                    try:
+                                        st.image(cv_plot_path, caption="MAPE (낮을수록 정확)")
+                                    except Exception as img_e:
+                                        st.warning(f"CV 이미지 로드 실패: {img_e}")
+                                elif cv_plot_path is None and isinstance(forecast_data_list, list) and len(forecast_data_list) > 0: # 예측은 성공했으나 CV 결과만 없을 때
                                     st.caption("교차 검증(CV) 결과 없음.")
-                                st.divider()
+                                st.divider() # 6번 예측 섹션 후 구분선
+
+                                # --- df_pred 초기화 추가 ---
+                                df_pred = pd.DataFrame() # 빈 데이터프레임으로 초기화
 
                                 # 7. 리스크 트래커
                                 st.subheader("🚨 리스크 트래커 (예측 기반)")
-                                risk_days, max_loss_pct, max_loss_amt = 0, 0, 0 # 루프 전에 초기화
+                                risk_days, max_loss_pct, max_loss_amt = 0, 0, 0
                                 if avg_p > 0 and isinstance(forecast_data_list, list) and len(forecast_data_list) > 0:
                                     try:
+                                        # !!! 여기서 df_pred에 실제 데이터 할당 시도 !!!
                                         df_pred = pd.DataFrame(forecast_data_list)
                                         required_fcst_cols = ['ds', 'yhat_lower']
+                                        # 필수 컬럼 존재 및 타입 확인 강화
                                         if not all(col in df_pred.columns for col in required_fcst_cols):
                                             st.warning("리스크 분석 위한 예측 컬럼 부족 ('ds', 'yhat_lower').")
+                                            df_pred = pd.DataFrame() # 유효하지 않으면 다시 비움
                                         else:
-                                            df_pred['ds'] = pd.to_datetime(df_pred['ds'])
-                                            # yhat_lower가 문자열 등으로 올 경우 대비
+                                            # 데이터 타입 변환 및 유효성 검사
+                                            df_pred['ds'] = pd.to_datetime(df_pred['ds'], errors='coerce')
                                             df_pred['yhat_lower'] = pd.to_numeric(df_pred['yhat_lower'], errors='coerce')
-                                            df_pred.dropna(subset=['yhat_lower'], inplace=True) # 유효하지 않은 값 제거
+                                            df_pred.dropna(subset=['ds', 'yhat_lower'], inplace=True) # NaN 제거
 
-                                            if not df_pred.empty:
+                                            if not df_pred.empty: # 유효한 데이터가 있을 때만 계산
                                                 df_pred['평단가'] = avg_p
                                                 df_pred['리스크 여부'] = df_pred['yhat_lower'] < avg_p
-                                                # ZeroDivisionError 방지
+                                                # ZeroDivisionError 방지 및 NaN 방지
                                                 df_pred['예상 손실률'] = np.where(
                                                     (df_pred['리스크 여부']) & (avg_p != 0),
                                                     ((df_pred['yhat_lower'] - avg_p) / avg_p) * 100,
                                                     0
                                                 )
+                                                df_pred['예상 손실률'] = df_pred['예상 손실률'].fillna(0) # 계산 중 NaN 발생 시 0으로
 
                                                 if qty > 0:
                                                     df_pred['예상 손실액'] = np.where(df_pred['리스크 여부'], (df_pred['yhat_lower'] - avg_p) * qty, 0)
+                                                    df_pred['예상 손실액'] = df_pred['예상 손실액'].fillna(0)
                                                 else:
                                                     df_pred['예상 손실액'] = 0
 
                                                 risk_days = df_pred['리스크 여부'].sum()
                                                 if risk_days > 0:
-                                                    # 손실률과 손실액은 음수이므로 min() 사용
-                                                    max_loss_pct = df_pred['예상 손실률'][df_pred['리스크 여부']].min()
-                                                    max_loss_amt = df_pred['예상 손실액'][df_pred['리스크 여부']].min() if qty > 0 else 0
+                                                    # NaN 값 제외하고 min 계산
+                                                    valid_loss_pct = df_pred.loc[df_pred['리스크 여부'], '예상 손실률'].dropna()
+                                                    max_loss_pct = valid_loss_pct.min() if not valid_loss_pct.empty else 0
+                                                    if qty > 0:
+                                                        valid_loss_amt = df_pred.loc[df_pred['리스크 여부'], '예상 손실액'].dropna()
+                                                        max_loss_amt = valid_loss_amt.min() if not valid_loss_amt.empty else 0
+                                                    else:
+                                                        max_loss_amt = 0
                                                 else:
-                                                    max_loss_pct = 0 # 리스크 없으면 0
+                                                    max_loss_pct = 0
                                                     max_loss_amt = 0
 
                                                 st.markdown("##### 리스크 요약")
@@ -524,41 +550,50 @@ if page == "📊 종합 분석":
 
                                                 st.markdown("##### 평단가 vs 예측 구간 비교")
                                                 fig_risk = go.Figure()
-                                                if 'yhat_upper' in df_pred.columns: # 상한선도 확인
-                                                   df_pred['yhat_upper'] = pd.to_numeric(df_pred['yhat_upper'], errors='coerce')
-                                                   df_pred.dropna(subset=['yhat_upper'], inplace=True)
-                                                   fig_risk.add_trace(go.Scatter(x=df_pred['ds'], y=df_pred['yhat_upper'], mode='lines', line_color='rgba(0,100,80,0.2)', name='Upper'))
+                                                # 컬럼 존재 및 타입 확인 후 차트 그리기
+                                                plot_cols_risk = {'yhat_lower': 'rgba(0,100,80,0.2)', 'yhat_upper': 'rgba(0,100,80,0.2)', 'yhat': 'rgba(0,100,80,0.6)'}
+                                                df_plot_risk = df_pred[['ds'] + list(plot_cols_risk.keys())].copy()
 
-                                                # 하한선 그리기 (상한선 fill을 위해 먼저 그림)
-                                                fig_risk.add_trace(go.Scatter(x=df_pred['ds'], y=df_pred['yhat_lower'], mode='lines', line_color='rgba(0,100,80,0.2)', name='Lower', fill='tonexty', fillcolor='rgba(0,100,80,0.1)'))
+                                                for col in plot_cols_risk:
+                                                   if col in df_plot_risk.columns:
+                                                      df_plot_risk[col] = pd.to_numeric(df_plot_risk[col], errors='coerce')
+                                                df_plot_risk.dropna(subset=['ds'] + list(plot_cols_risk.keys()), how='any', inplace=True)
 
-                                                if 'yhat' in df_pred.columns: # 예측값 확인
-                                                   df_pred['yhat'] = pd.to_numeric(df_pred['yhat'], errors='coerce')
-                                                   df_pred.dropna(subset=['yhat'], inplace=True)
-                                                   fig_risk.add_trace(go.Scatter(x=df_pred['ds'], y=df_pred['yhat'], mode='lines', line=dict(dash='dash', color='rgba(0,100,80,0.6)'), name='Forecast'))
+                                                if not df_plot_risk.empty:
+                                                   if 'yhat_upper' in df_plot_risk.columns:
+                                                      fig_risk.add_trace(go.Scatter(x=df_plot_risk['ds'], y=df_plot_risk['yhat_upper'], mode='lines', line_color=plot_cols_risk['yhat_upper'], name='Upper'))
+                                                   if 'yhat_lower' in df_plot_risk.columns:
+                                                      fig_risk.add_trace(go.Scatter(x=df_plot_risk['ds'], y=df_plot_risk['yhat_lower'], mode='lines', line_color=plot_cols_risk['yhat_lower'], name='Lower', fill='tonexty' if 'yhat_upper' in df_plot_risk.columns else None, fillcolor='rgba(0,100,80,0.1)'))
+                                                   if 'yhat' in df_plot_risk.columns:
+                                                      fig_risk.add_trace(go.Scatter(x=df_plot_risk['ds'], y=df_plot_risk['yhat'], mode='lines', line=dict(dash='dash', color=plot_cols_risk['yhat']), name='Forecast'))
 
-                                                fig_risk.add_hline(y=avg_p, line_dash="dot", line_color="red", annotation_text=f"평단가: ${avg_p:.2f}", annotation_position="bottom right")
-                                                df_risk_periods = df_pred[df_pred['리스크 여부']] # 리스크 있는 날짜만 필터링
-                                                if not df_risk_periods.empty:
-                                                    fig_risk.add_trace(go.Scatter(x=df_risk_periods['ds'], y=df_risk_periods['yhat_lower'], mode='markers', marker_symbol='x', marker_color='red', name='Risk Day'))
-                                                fig_risk.update_layout(hovermode="x unified")
-                                                st.plotly_chart(fig_risk, use_container_width=True)
+                                                   fig_risk.add_hline(y=avg_p, line_dash="dot", line_color="red", annotation_text=f"평단가: ${avg_p:.2f}", annotation_position="bottom right")
+                                                   df_risk_periods = df_pred[df_pred['리스크 여부']] # 리스크 있는 날짜만 필터링
+                                                   if not df_risk_periods.empty:
+                                                       fig_risk.add_trace(go.Scatter(x=df_risk_periods['ds'], y=df_risk_periods['yhat_lower'], mode='markers', marker_symbol='x', marker_color='red', name='Risk Day'))
+                                                   fig_risk.update_layout(hovermode="x unified")
+                                                   st.plotly_chart(fig_risk, use_container_width=True)
 
-                                                if risk_days > 0:
-                                                    with st.expander(f"리스크 예측일 상세 데이터 ({risk_days}일)"):
-                                                        df_risk_days_display = df_pred[df_pred['리스크 여부']].copy()
-                                                        df_risk_days_display['ds'] = df_risk_days_display['ds'].dt.strftime('%Y-%m-%d')
-                                                        cols_show = ['ds', 'yhat_lower', '평단가', '예상 손실률']
-                                                        formatters = {"yhat_lower":"{:.2f}", "평단가":"{:.2f}", "예상 손실률":"{:.2f}%"}
-                                                        if qty > 0:
-                                                            cols_show.append('예상 손실액')
-                                                            formatters["예상 손실액"] = "${:,.2f}"
-                                                        st.dataframe(df_risk_days_display[cols_show].style.format(formatters), use_container_width=True)
+                                                   if risk_days > 0:
+                                                       with st.expander(f"리스크 예측일 상세 데이터 ({risk_days}일)"):
+                                                           df_risk_days_display = df_pred[df_pred['리스크 여부']].copy()
+                                                           df_risk_days_display['ds'] = df_risk_days_display['ds'].dt.strftime('%Y-%m-%d')
+                                                           cols_show = ['ds', 'yhat_lower', '평단가', '예상 손실률']
+                                                           formatters = {"yhat_lower":"{:.2f}", "평단가":"{:.2f}", "예상 손실률":"{:.2f}%"}
+                                                           if qty > 0 and '예상 손실액' in df_risk_days_display.columns:
+                                                               cols_show.append('예상 손실액')
+                                                               formatters["예상 손실액"] = "${:,.2f}"
+                                                           st.dataframe(df_risk_days_display[cols_show].style.format(formatters), use_container_width=True)
+                                                else:
+                                                   st.info("차트 표시에 필요한 유효한 예측 데이터가 부족합니다.")
                                             else:
-                                                st.info("리스크 분석 위한 유효한 예측 데이터가 없습니다.")
+                                                st.info("리스크 분석 위한 유효한 데이터가 없습니다.") # df_pred는 생성되었으나 NaN 등으로 비워진 경우
+
                                     except Exception as risk_calc_err:
-                                        st.error(f"리스크 트래커 계산 중 오류 발생: {risk_calc_err}")
-                                        logging.error(f"Risk tracker error during calculation: {traceback.format_exc()}")
+                                        st.error(f"리스크 트래커 계산/표시 중 오류 발생: {risk_calc_err}")
+                                        logging.error(f"Risk tracker error during calculation/plotting: {traceback.format_exc()}")
+                                        # df_pred = pd.DataFrame() # 오류 시 비우는 것은 이미 try 블록 시작 시 초기화로 대체 가능
+
                                 elif avg_p <= 0:
                                     st.info("⬅️ 사이드바에서 '평단가' 입력 시 리스크 분석 결과를 확인할 수 있습니다.")
                                 else: # 예측 데이터 자체가 없는 경우
@@ -567,27 +602,35 @@ if page == "📊 종합 분석":
 
                                 # 8. 자동 분석 결과 요약 (summary_points 최종 한 번만 출력)
                                 st.subheader("🧐 자동 분석 결과 요약 (참고용)")
-                                summary_points = [] # 요약 리스트 초기화
+                                summary_points = []
 
                                 # 예측 요약
-                                if isinstance(forecast_data_list, list) and len(forecast_data_list) > 0 and not df_pred.empty: # df_pred가 생성되고 비어있지 않은지 확인
+                                if not df_pred.empty: # df_pred가 비어있지 않은지 (즉, 예측 데이터가 유효했는지) 확인
                                     try:
-                                        # df_pred는 위에서 이미 계산됨
-                                        start_pred = df_pred["yhat"].iloc[0]
-                                        end_pred   = df_pred["yhat"].iloc[-1]
-                                        trend_obs = ("상승" if end_pred > start_pred * 1.02 else "하락" if end_pred < start_pred * 0.98 else "횡보")
-                                        lower = df_pred["yhat_lower"].min()
-                                        upper = df_pred["yhat_upper"].max()
-                                        summary_points.append(f"- **예측:** 향후 {days}일간 **{trend_obs}** 추세 (${lower:.2f} ~ ${upper:.2f})")
+                                        # 필요한 컬럼 존재 여부 확인 추가
+                                        if all(col in df_pred.columns for col in ['yhat', 'yhat_lower', 'yhat_upper']):
+                                             start_pred = df_pred["yhat"].iloc[0]
+                                             end_pred   = df_pred["yhat"].iloc[-1]
+                                             # Check if start_pred or end_pred is NaN before comparison
+                                             if pd.notna(start_pred) and pd.notna(end_pred):
+                                                 trend_obs = ("상승" if end_pred > start_pred * 1.02 else "하락" if end_pred < start_pred * 0.98 else "횡보")
+                                             else:
+                                                 trend_obs = "판단 불가" # Handle NaN case
+                                             # Check if lower/upper exist and are not all NaN
+                                             lower = df_pred["yhat_lower"].min() if 'yhat_lower' in df_pred.columns and df_pred['yhat_lower'].notna().any() else 'N/A'
+                                             upper = df_pred["yhat_upper"].max() if 'yhat_upper' in df_pred.columns and df_pred['yhat_upper'].notna().any() else 'N/A'
+                                             lower_str = f"${lower:.2f}" if isinstance(lower, (int, float)) else lower
+                                             upper_str = f"${upper:.2f}" if isinstance(upper, (int, float)) else upper
+                                             summary_points.append(f"- **예측:** 향후 {days}일간 **{trend_obs}** 추세 ({lower_str} ~ {upper_str})")
+                                        else:
+                                             summary_points.append("- 예측: 예측 결과에 필요한 컬럼(yhat 등) 부족")
                                     except Exception as e:
                                         logging.warning(f"예측 요약 생성 오류: {e}")
                                         summary_points.append("- 예측: 요약 생성 중 오류 발생")
-                                else:
+                                else: # df_pred가 비어있는 경우
                                      summary_points.append("- 예측: 예측 데이터 부족/오류로 요약 불가")
 
-
-                                # 뉴스 요약
-                                # news_sentiment 변수는 위에서 이미 할당됨
+                                # 뉴스 요약 (news_sentiment 변수는 위에서 이미 할당됨)
                                 if isinstance(news_sentiment, list) and len(news_sentiment) > 0 and ":" in news_sentiment[0]:
                                     try:
                                         score_part = news_sentiment[0].split(":")[-1].strip()
@@ -597,18 +640,19 @@ if page == "📊 종합 분석":
                                     except Exception as e:
                                         logging.warning(f"뉴스 요약 오류: {e}")
                                         summary_points.append("- 뉴스: 요약 처리 중 오류 발생.")
+                                elif isinstance(news_sentiment, list): # 오류 메시지 등이 리스트로 올 경우
+                                     summary_points.append(f"- 뉴스: {news_sentiment[0]}") # 첫 번째 메시지 표시
                                 else:
                                     summary_points.append("- 뉴스: 감성 분석 정보 없음/오류.")
 
-                                # F&G 요약
-                                # fng_index 변수는 위에서 이미 할당됨
+
+                                # F&G 요약 (fng_index 변수는 위에서 이미 할당됨)
                                 if isinstance(fng_index, dict):
                                     summary_points.append(f"- **시장 심리:** 공포-탐욕 {fng_index.get('value', 'N/A')} (**{fng_index.get('classification', 'N/A')}**).")
                                 else:
                                     summary_points.append("- 시장 심리: 공포-탐욕 지수 정보 없음/오류.")
 
-                                # 기본 정보 요약
-                                # fundamentals 변수는 위에서 이미 할당됨
+                                # 기본 정보 요약 (fundamentals 변수는 위에서 이미 할당됨)
                                 if fundamentals and isinstance(fundamentals, dict):
                                     per = fundamentals.get("PER", "N/A")
                                     sector = fundamentals.get("업종", "N/A")
@@ -623,17 +667,27 @@ if page == "📊 종합 분석":
                                 # 재무 추세 요약
                                 trend_parts = []
                                 try:
-                                    # 결과 딕셔너리에서 직접 가져오기
-                                    op_margin_trend_list = results.get('operating_margin_trend')
-                                    roe_trend_list = results.get('roe_trend')
-                                    debt_trend_list = results.get('debt_to_equity_trend')
-                                    current_trend_list = results.get('current_ratio_trend')
+                                    trend_keys = ['operating_margin_trend', 'roe_trend', 'debt_to_equity_trend', 'current_ratio_trend']
+                                    trend_labels = {'operating_margin_trend': '영업익률', 'roe_trend': 'ROE', 'debt_to_equity_trend': '부채비율', 'current_ratio_trend': '유동비율'}
+                                    trend_formats = {'operating_margin_trend': '.2f%', 'roe_trend': '.2f%', 'debt_to_equity_trend': '.2f', 'current_ratio_trend': '.2f'}
+                                    trend_value_keys = {'operating_margin_trend': 'Op Margin (%)', 'roe_trend': 'ROE (%)', 'debt_to_equity_trend': 'D/E Ratio', 'current_ratio_trend': 'Current Ratio'}
 
-                                    # 리스트이고 비어있지 않은 경우 마지막 값 사용
-                                    if op_margin_trend_list and isinstance(op_margin_trend_list, list): trend_parts.append(f"영업익률 {op_margin_trend_list[-1].get('Op Margin (%)', 'N/A'):.2f}%")
-                                    if roe_trend_list and isinstance(roe_trend_list, list): trend_parts.append(f"ROE {roe_trend_list[-1].get('ROE (%)', 'N/A'):.2f}%")
-                                    if debt_trend_list and isinstance(debt_trend_list, list): trend_parts.append(f"부채비율 {debt_trend_list[-1].get('D/E Ratio', 'N/A'):.2f}")
-                                    if current_trend_list and isinstance(current_trend_list, list): trend_parts.append(f"유동비율 {current_trend_list[-1].get('Current Ratio', 'N/A'):.2f}")
+                                    for key in trend_keys:
+                                        trend_list = results.get(key)
+                                        if trend_list and isinstance(trend_list, list):
+                                            last_item = trend_list[-1] # 마지막 분기 데이터
+                                            value_key = trend_value_keys[key]
+                                            if value_key in last_item:
+                                                value = last_item[value_key]
+                                                # 숫자 타입인지 확인 후 포맷 적용
+                                                if isinstance(value, (int, float)):
+                                                   formatted_value = f"{value:{trend_formats[key]}}"
+                                                   trend_parts.append(f"{trend_labels[key]} {formatted_value}")
+                                                else:
+                                                   trend_parts.append(f"{trend_labels[key]} N/A")
+                                            else:
+                                                 trend_parts.append(f"{trend_labels[key]} N/A") # 키가 없는 경우
+                                        # 데이터 없으면 추가 안 함
 
                                     if trend_parts: summary_points.append(f"- **최근 재무:** {', '.join(trend_parts)}.")
                                     else: summary_points.append("- 최근 재무: 추세 데이터 없음/부족.")
@@ -642,14 +696,14 @@ if page == "📊 종합 분석":
                                     summary_points.append("- 최근 재무: 요약 처리 중 오류 발생.")
 
                                 # 리스크 요약
-                                if avg_p > 0 and isinstance(forecast_data_list, list) and len(forecast_data_list) > 0 and not df_pred.empty:
+                                if avg_p > 0 and not df_pred.empty: # df_pred 유효성 확인
                                     # risk_days, max_loss_pct 값은 위 리스크 트래커에서 이미 계산됨
                                     if risk_days > 0:
                                         summary_points.append(f"- **리스크:** {days}일 중 **{risk_days}일** 평단가(${avg_p:.2f}) 하회 가능성 (Max 손실률: **{max_loss_pct:.2f}%**).")
                                     else:
                                         summary_points.append(f"- **리스크:** 예측 기간 내 평단가(${avg_p:.2f}) 하회 가능성 낮음.")
-                                elif avg_p > 0: # 평단가는 입력했으나 예측/분석이 안된 경우
-                                     summary_points.append(f"- 리스크: 평단가(${avg_p:.2f}) 입력됨, 예측 데이터 부족/오류로 분석 불가.")
+                                elif avg_p > 0: # 평단가는 입력했으나 df_pred가 비어있는 경우
+                                    summary_points.append(f"- 리스크: 평단가(${avg_p:.2f}) 입력됨, 예측 데이터 부족/오류로 분석 불가.")
                                 # 평단가 입력 안하면 리스크 요약은 추가 안 함
 
                                 # --- summary_points 최종 한 번만 출력 ---
@@ -658,9 +712,9 @@ if page == "📊 종합 분석":
                                     st.caption("⚠️ **주의:** 자동 생성된 요약이며 투자 결정의 근거가 될 수 없습니다.")
                                 else:
                                     st.write("분석 요약을 생성할 수 없습니다 (데이터 부족 또는 오류).")
-                                # --- 상세 결과 표시 끝 ---
+                            # --- 결과 표시 영역 끝 ---
 
-                    elif results is None: # run_cached_analysis 자체가 None 반환 시 (거의 발생 안 함)
+                    elif results is None: # run_cached_analysis 자체가 None 반환 시
                          results_placeholder.error("분석 결과 처리 중 예상치 못한 오류 발생 (결과 없음).")
                     else: # dict 형태가 아닌 경우 등 기타 문제
                         results_placeholder.error("분석 결과 처리 중 오류 발생 (결과 형식 오류).")
@@ -677,6 +731,8 @@ if page == "📊 종합 분석":
             results_placeholder.info("⬅️ 사이드바에서 설정을 확인하고 '종합 분석 시작!' 버튼을 클릭하세요.")
         else:
             results_placeholder.warning("API 키 로드 실패로 종합 분석을 진행할 수 없습니다. 사이드바 메시지를 확인하세요.")
+
+# 이하 기술 분석 탭 로직 (`elif page == "📈 기술 분석":`)은 여기에 포함되지 않습니다.
 
 
 # ============== 📈 기술 분석 탭 ==============
