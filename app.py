@@ -280,8 +280,8 @@ def run_cached_analysis(ticker, news_key, fred_key, years, days, num_trend_perio
         # stock_analysis.py의 analyze_stock 함수 호출
         analysis_results = sa.analyze_stock(
             ticker,
-            news_api_key=news_key,
-            fred_api_key=fred_key,
+            news_key=news_key,
+            fred_key=fred_key,
             analysis_period_years=years,
             forecast_days=days,
             num_trend_periods=num_trend_periods,
