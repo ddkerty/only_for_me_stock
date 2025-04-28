@@ -801,7 +801,6 @@ def analyze_stock(ticker, news_key, fred_key, analysis_period_years=2, forecast_
             changepoint_prior_scale=changepoint_prior_scale # 인자 전달
         )
         # 결과 처리
-        forecast_result = run_prophet_forecast(...)
         if forecast_result and isinstance(forecast_result, tuple) and len(forecast_result) == 4:
             fc_list, fc_fig, cv_path, mape = forecast_result
             output_results['prophet_forecast'] = fc_list    or "예측 실패"
