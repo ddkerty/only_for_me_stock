@@ -273,10 +273,7 @@ if page == "📊 종합 분석":
                     if analyze_button_main:
                         ticker_proc = ticker.strip().upper()
                         with st.spinner(f"{ticker_proc} 종합 분석 중..."):
-                            results = run_cached_analysis(
-                                ticker_proc, NEWS_API_KEY, FRED_API_KEY,
-                                years, days, periods, cp_prior
-                            )
+
 
                             # ── MAPE 경고 배너 삽입 ──
                             if isinstance(results, dict) and results.get("warn_high_mape"):
@@ -285,13 +282,23 @@ if page == "📊 종합 분석":
                                     f"🔴 모델 정확도 낮음 (MAPE {m:.1f}%). 예측 신뢰도에 주의하세요!"
                                 )
                             # ────────────────────────────
+                            # ── 정상/에러 처리 & 상세 결과 표시 ──
+                            if results and isinstance(results, dict) and "error" not in results:
+                                # 이전에 결과 플레이스홀더 비우기
+                                results_placeholder.empty()
+                                
+                                # === 상세 결과 표시 (V1.9.5 유지) ===
+                                st.header(f"📈 {ticker_proc} 분석 결과 (민감도: {cp_prior:.3f})")
+                                # 1. 요약 정보
+                                st.subheader("요약 정보")
+                                # … (기존에 있던 상세 출력 로직 전체) …
 
-                            # 정상/에러 처리
-                            if results and "error" not in results:
-                                # …정상 출력 로직…
                             elif results and "error" in results:
+                                # 에러 있을 때
                                 results_placeholder.error(f"분석 실패: {results['error']}")
-                    results_placeholder.empty()
+                            else:
+                                # results 자체가 None이거나 형식이 잘못된 경우
+                                results_placeholder.error("분석 결과 처리 중 오류.")
                     if results and isinstance(results, dict) and "error" not in results:
                         # === 상세 결과 표시 (V1.9.5 내용 유지, 재무추세 부분 가독성 수정) ===
                         st.header(f"📈 {ticker_proc} 분석 결과 (민감도: {cp_prior:.3f})")
