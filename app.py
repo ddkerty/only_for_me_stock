@@ -197,7 +197,7 @@ with st.sidebar:
         st.caption("📱 코드 스캔으로 후원할 수 있습니다")
     st.markdown("📘 [분석도구 상세정보](https://technut.tistory.com/3)", unsafe_allow_html=True)
     #st.markdown("설명서 (업데이트 예정)") # 버전 업데이트
-    st.title("📊 주식 분석 도구 개인버전 V1.9.6") # 버전 업데이트
+    st.title("📊 주식 분석 도구 개인버전 V1.9.8") # 버전 업데이트
     st.markdown("---")
     page = st.radio("분석 유형 선택", ["📊 종합 분석", "📈 기술 분석"], captions=["재무, 예측, 뉴스 등", "VWAP, BB, 피보나치 등"], key="page_selector")
     st.markdown("---")
@@ -232,7 +232,6 @@ with st.sidebar:
 # --- 캐시된 종합 분석 함수 ---
 @st.cache_data(ttl=timedelta(hours=1))
 def run_cached_analysis(ticker, news_key, fred_key, years, days, num_trend_periods, changepoint_prior_scale):
-    # (V1.9.5와 동일)
     try: import stock_analysis as sa
     except ImportError as import_err: return {"error": f"분석 모듈(stock_analysis.py) 로딩 오류: {import_err}."}
     except Exception as e: return {"error": f"분석 모듈 로딩 중 오류: {e}"}
@@ -270,6 +269,28 @@ if page == "📊 종합 분석":
             with st.spinner(f"{ticker_proc} 종합 분석 중..."):
                 try:
                     results = run_cached_analysis(ticker_proc, NEWS_API_KEY, FRED_API_KEY, years, days, periods, cp_prior)
+                    # 분석 버튼 클릭 직후
+                    if analyze_button_main:
+                        ticker_proc = ticker.strip().upper()
+                        with st.spinner(f"{ticker_proc} 종합 분석 중..."):
+                            results = run_cached_analysis(
+                                ticker_proc, NEWS_API_KEY, FRED_API_KEY,
+                                years, days, periods, cp_prior
+                            )
+
+                            # ── MAPE 경고 배너 삽입 ──
+                            if isinstance(results, dict) and results.get("warn_high_mape"):
+                                m = results.get("mape", 0.0)
+                                results_placeholder.warning(
+                                    f"🔴 모델 정확도 낮음 (MAPE {m:.1f}%). 예측 신뢰도에 주의하세요!"
+                                )
+                            # ────────────────────────────
+
+                            # 정상/에러 처리
+                            if results and "error" not in results:
+                                # …정상 출력 로직…
+                            elif results and "error" in results:
+                                results_placeholder.error(f"분석 실패: {results['error']}")
                     results_placeholder.empty()
                     if results and isinstance(results, dict) and "error" not in results:
                         # === 상세 결과 표시 (V1.9.5 내용 유지, 재무추세 부분 가독성 수정) ===
@@ -681,6 +702,6 @@ elif page == "📈 기술 분석":
 # --- 앱 정보 ---
 st.sidebar.markdown("---")
 
-st.sidebar.info("종합 주식 분석 툴 V1.9.6 | 정보 제공 목적 (투자 조언 아님)") # 버전 정보 최종 업데이트
+st.sidebar.info("종합 주식 분석 툴 V1.9.8 | 정보 제공 목적 (투자 조언 아님)") # 버전 정보 최종 업데이트
 st.sidebar.markdown("📌 [개발기 보러가기](https://technut.tistory.com/1)", unsafe_allow_html=True)
 st.sidebar.caption("👨‍💻 기술 기반 주식 분석 툴 개발기")
