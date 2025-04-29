@@ -673,26 +673,47 @@ if page == "📊 종합 분석":
                                 trend_parts = []
                                 try:
                                     trend_keys = ['operating_margin_trend', 'roe_trend', 'debt_to_equity_trend', 'current_ratio_trend']
-                                    trend_labels = {'operating_margin_trend': '영업익률', 'roe_trend': 'ROE', 'debt_to_equity_trend': '부채비율', 'current_ratio_trend': '유동비율'}
-                                    trend_formats = {'operating_margin_trend': '.2f%', 'roe_trend': '.2f%', 'debt_to_equity_trend': '.2f', 'current_ratio_trend': '.2f'}
-                                    trend_value_keys = {'operating_margin_trend': 'Op Margin (%)', 'roe_trend': 'ROE (%)', 'debt_to_equity_trend': 'D/E Ratio', 'current_ratio_trend': 'Current Ratio'}
-
+                                    trend_labels = {
+                                        'operating_margin_trend': '영업익률',
+                                        'roe_trend': 'ROE',
+                                        'debt_to_equity_trend': '부채비율',
+                                        'current_ratio_trend': '유동비율'
+                                    }
+                                    trend_formats = {
+                                        'operating_margin_trend': '.2f%',
+                                        'roe_trend': '.2f%',
+                                        'debt_to_equity_trend': '.2f',
+                                        'current_ratio_trend': '.2f'
+                                    }
+                                    trend_value_keys = {
+                                        'operating_margin_trend': 'Op Margin (%)',
+                                        'roe_trend': 'ROE (%)',
+                                        'debt_to_equity_trend': 'D/E Ratio',
+                                        'current_ratio_trend': 'Current Ratio'
+                                    }
+                                
                                     for key in trend_keys:
                                         trend_list = results.get(key)
                                         if trend_list and isinstance(trend_list, list):
-                                            last_item = trend_list[-1] # 마지막 분기 데이터
+                                            last_item = trend_list[-1]  # 마지막 분기 데이터
                                             value_key = trend_value_keys[key]
-                                            if value_key in last_item:
-                                                value = last_item[value_key]
-                                                # 숫자 타입인지 확인 후 포맷 적용
-                                                if isinstance(value, (int, float)):
-                                                   formatted_value = f"{value:{trend_formats[key]}}"
-                                                   trend_parts.append(f"{trend_labels[key]} {formatted_value}")
-                                                else:
-                                                   trend_parts.append(f"{trend_labels[key]} N/A")
+                                            value = last_item.get(value_key)
+                                
+                                            # 값이 숫자인 경우에만 포맷 적용
+                                            if isinstance(value, (int, float)):
+                                                formatted_value = f"{value:{trend_formats[key]}}"
+                                                trend_parts.append(f"{trend_labels[key]} {formatted_value}")
+                                            elif value is not None:
+                                                trend_parts.append(f"{trend_labels[key]}: {value}")  # 문자열 그대로 출력
                                             else:
-                                                 trend_parts.append(f"{trend_labels[key]} N/A") # 키가 없는 경우
-                                        # 데이터 없으면 추가 안 함
+                                                trend_parts.append(f"{trend_labels[key]} 정보 부족")
+                                
+                                    if trend_parts:
+                                        summary_points.append(f"- **최근 재무:** {', '.join(trend_parts)}.")
+                                except Exception as e:
+                                    logging.warning(f"재무 추세 요약 오류: {e}")
+                                    summary_points.append("- 최근 재무: 요약 처리 중 오류 발생.")
+
 
                                     if trend_parts: summary_points.append(f"- **최근 재무:** {', '.join(trend_parts)}.")
                                     else: summary_points.append("- 최근 재무: 추세 데이터 없음/부족.")
