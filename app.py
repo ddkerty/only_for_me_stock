@@ -714,13 +714,6 @@ if page == "📊 종합 분석":
                                     logging.warning(f"재무 추세 요약 오류: {e}")
                                     summary_points.append("- 최근 재무: 요약 처리 중 오류 발생.")
 
-
-                                    if trend_parts: summary_points.append(f"- **최근 재무:** {', '.join(trend_parts)}.")
-                                    else: summary_points.append("- 최근 재무: 추세 데이터 없음/부족.")
-                                except Exception as e:
-                                    logging.warning(f"재무 추세 요약 오류: {e}")
-                                    summary_points.append("- 최근 재무: 요약 처리 중 오류 발생.")
-
                                 # 리스크 요약
                                 if avg_p > 0 and not df_pred.empty: # df_pred 유효성 확인
                                     # risk_days, max_loss_pct 값은 위 리스크 트래커에서 이미 계산됨
