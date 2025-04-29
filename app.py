@@ -679,11 +679,11 @@ if page == "📊 종합 분석":
                                         'debt_to_equity_trend': '부채비율',
                                         'current_ratio_trend': '유동비율'
                                     }
-                                    trend_formats = {
-                                        'operating_margin_trend': '.2f%',
-                                        'roe_trend': '.2f%',
-                                        'debt_to_equity_trend': '.2f',
-                                        'current_ratio_trend': '.2f'
+                                    trend_suffix = {
+                                        'operating_margin_trend': '%',
+                                        'roe_trend': '%',
+                                        'debt_to_equity_trend': '',
+                                        'current_ratio_trend': ''
                                     }
                                     trend_value_keys = {
                                         'operating_margin_trend': 'Op Margin (%)',
@@ -695,16 +695,13 @@ if page == "📊 종합 분석":
                                     for key in trend_keys:
                                         trend_list = results.get(key)
                                         if trend_list and isinstance(trend_list, list):
-                                            last_item = trend_list[-1]  # 마지막 분기 데이터
+                                            last_item = trend_list[-1]
                                             value_key = trend_value_keys[key]
                                             value = last_item.get(value_key)
-                                
-                                            # 값이 숫자인 경우에만 포맷 적용
                                             if isinstance(value, (int, float)):
-                                                formatted_value = f"{value:{trend_formats[key]}}"
-                                                trend_parts.append(f"{trend_labels[key]} {formatted_value}")
+                                                trend_parts.append(f"{trend_labels[key]} {value:.2f}{trend_suffix[key]}")
                                             elif value is not None:
-                                                trend_parts.append(f"{trend_labels[key]}: {value}")  # 문자열 그대로 출력
+                                                trend_parts.append(f"{trend_labels[key]}: {value}")
                                             else:
                                                 trend_parts.append(f"{trend_labels[key]} 정보 부족")
                                 
@@ -713,6 +710,7 @@ if page == "📊 종합 분석":
                                 except Exception as e:
                                     logging.warning(f"재무 추세 요약 오류: {e}")
                                     summary_points.append("- 최근 재무: 요약 처리 중 오류 발생.")
+
 
                                 # 리스크 요약
                                 if avg_p > 0 and not df_pred.empty: # df_pred 유효성 확인
