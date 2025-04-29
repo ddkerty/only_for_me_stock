@@ -488,7 +488,12 @@ if page == "📊 종합 분석":
                                 st.divider() # 6번 예측 섹션 후 구분선
 
                                 # --- df_pred 초기화 추가 ---
-                                df_pred = pd.DataFrame() # 빈 데이터프레임으로 초기화
+                                # --- 예측 결과를 DataFrame 으로 변환(있을 때만) ---
+                                forecast_data_list = results.get('prophet_forecast')
+                                if isinstance(forecast_data_list, list) and forecast_data_list:
+                                    df_pred = pd.DataFrame(forecast_data_list)
+                                else:
+                                    df_pred = pd.DataFrame()         # 예측이 전혀 없을 때만 빈 DF
 
                                 # 7. 리스크 트래커
                                 st.subheader("🚨 리스크 트래커 (예측 기반)")
