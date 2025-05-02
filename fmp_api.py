@@ -24,8 +24,7 @@ def _request(endpoint: str, params: dict | None = None):
 # ──────── 래퍼 함수 ────────
 @st.cache_data(ttl=3600)
 def get_price_data(ticker: str, days: int = 60):
-    data = _request(f"historical-price-full/{ticker}",
-                    {"serietype": "line", "timeseries": days})
+    data = _request(f"historical-price-full/{ticker}", {"from": start_date, "to": end_date})
     return data.get("historical", [])
 
 @st.cache_data(ttl=86400)
@@ -44,3 +43,9 @@ def get_income_statement(ticker: str, limit: int = 4):
 @st.cache_data(ttl=3600)
 def get_balance_sheet(ticker: str, limit: int = 4):
     return _request(f"balance-sheet-statement/{ticker}", {"period": "quarter", "limit": limit})
+
+@st.cache_data(ttl=1800)
+def get_quote_bulk(symbols: list[str]):
+    symbols_str = ",".join(symbols)
+    return _request(f"quote/{symbols_str}")
+
