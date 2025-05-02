@@ -1,52 +1,38 @@
-# fmp_api.py
+# fmp_api.py ─ 최종
 
-import os
-import requests
-import logging
+import os, logging, requests, streamlit as st
 from dotenv import load_dotenv
-import streamlit as st
 
-# 환경 변수 불러오기
 load_dotenv()
-FMP_API_KEY = os.getenv("FMP_API_KEY")
+FMP_API_KEY = os.getenv("FMP_API_KEY") or st.secrets.get("FMP_API_KEY")
+BASE_URL    = "https://financialmodelingprep.com/api/v3"
 
-BASE_URL = "https://financialmodelingprep.com/api/v3"
+SESSION = requests.Session()
+SESSION.headers.update({"User-Agent": "TechnutStock/1.0"})
 
-# 공통 요청 함수
-def fetch_fmp(endpoint, params={}):
+def _request(endpoint: str, params: dict | None = None):
     if not FMP_API_KEY:
-        raise ValueError("FMP_API_KEY가 .env 또는 st.secrets에 설정되어 있지 않습니다.")
-    try:
-        params["apikey"] = FMP_API_KEY
-        url = f"{BASE_URL}/{endpoint}"
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        logging.error(f"[FMP 요청 오류] {endpoint}: {e}")
-        return None
-    
+        raise EnvironmentError("FMP_API_KEY not set")
+    params = params or {}
+    params["apikey"] = FMP_API_KEY
+    url = f"{BASE_URL}/{endpoint}"
+
+    resp = SESSION.get(url, params=params, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+# ──────── 래퍼 함수 ────────
 @st.cache_data(ttl=3600)
-def get_price_data_fmp(ticker, days=60):
-    endpoint = f"historical-price-full/{ticker}"
-    params = {
-        "serietype": "line",
-        "timeseries": days
-    }
-    data = fetch_fmp(endpoint, params)
-    if data and "historical" in data:
-        return data["historical"]
-    return []
+def get_price_data(ticker: str, days: int = 60):
+    data = _request(f"historical-price-full/{ticker}",
+                    {"serietype": "line", "timeseries": days})
+    return data.get("historical", [])
 
 @st.cache_data(ttl=86400)
-def get_fundamentals_fmp(ticker):
-    endpoint = f"profile/{ticker}"
-    data = fetch_fmp(endpoint)
-    return data[0] if isinstance(data, list) and data else {}
+def get_profile(ticker: str):
+    data = _request(f"profile/{ticker}")
+    return data[0] if data else {}
 
 @st.cache_data(ttl=1800)
-def get_news_fmp(ticker, limit=10):
-    endpoint = "stock_news"
-    params = {"tickers": ticker, "limit": limit}
-    data = fetch_fmp(endpoint, params)
-    return data if data else []
+def get_news(ticker: str, limit: int = 10):
+    return _request("stock_news", {"tickers": ticker, "limit": limit})
