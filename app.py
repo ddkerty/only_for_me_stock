@@ -244,7 +244,7 @@ if not comprehensive_analysis_possible:
 # FRED 키 관련 메시지 (필요 시)
 # elif not fred_key_loaded:
 #     st.sidebar.warning("FRED API 키 로드 실패. 일부 매크로 분석이 제한될 수 있습니다.")
-elif not isinstance(sidebar_status, st.empty): # 에러/경고 메시지가 있다면 성공 메시지 덮어쓰지 않음
+#elif not isinstance(sidebar_status, st.empty): # 에러/경고 메시지가 있다면 성공 메시지 덮어쓰지 않음
     pass
 # elif sidebar_status: # 성공 메시지 표시 (선택적, 이미 표시되었을 수 있음)
 #      sidebar_status.success("API 키 로드 완료.")
