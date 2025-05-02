@@ -4,8 +4,6 @@ import os
 import logging
 import pandas as pd
 import numpy as np
-# import yfinance as yf # Still needed for financials/macro unless fully replaced
-import yfinance as yf # Keep for now for financials/macro
 import fmp_api # Import the new FMP API module
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -25,6 +23,8 @@ import warnings
 import locale
 import re
 import pandas_ta as ta
+from fmp_api import get_income_statement
+from fmp_api import get_income_statement, get_balance_sheet
 
 # 경고 메시지 및 로깅 설정
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -376,223 +376,99 @@ def get_fundamental_data(ticker):
 # --- Financial Statement Trend Functions (Still using yfinance) ---
 # These need to be adapted to use FMP financial statement endpoints if full replacement is desired.
 
+
 def get_operating_margin_trend(ticker, num_periods=4):
-    """최근 분기별 영업이익률 추세 계산 (yfinance)"""
-    # TODO: FMP Integration - Replace yf.Ticker().quarterly_financials with FMP income statement endpoint call
-    logging.info(f"{ticker}: 영업이익률 추세 ({num_periods}분기) using yfinance...")
+    """FMP 기반 영업이익률(%) 추세"""
     try:
-        stock = yf.Ticker(ticker)
-        qf = stock.quarterly_financials
-        if qf.empty:
-            logging.warning(f"{ticker}: 분기 재무 없음 (yfinance).")
-            return None
-        revenue_col = find_financial_statement_item(qf.index, ['Total', 'Revenue'], ['Total Revenue', 'Revenue'])
-        op_income_col = find_financial_statement_item(qf.index, ['Operating', 'Income'], ['Operating Income', 'Operating Income Loss'])
-        if not revenue_col or not op_income_col:
-            logging.warning(f"{ticker}: 매출/영업이익 항목 못찾음 (yfinance).")
-            return None
-
-        qf_recent = qf.iloc[:, :num_periods]
-        df = qf_recent.loc[[revenue_col, op_income_col]].T.sort_index()
-        df.index = pd.to_datetime(df.index)
-
-        df[revenue_col] = pd.to_numeric(df[revenue_col], errors='coerce')
-        df[op_income_col] = pd.to_numeric(df[op_income_col], errors='coerce')
-        df[revenue_col] = df[revenue_col].replace(0, np.nan)
-        df.dropna(subset=[revenue_col, op_income_col], inplace=True)
-
-        if df.empty:
-            logging.warning(f"{ticker}: 영업이익률 계산 데이터 부족 (yfinance).")
-            return None
-
-        df['Op Margin (%)'] = (df[op_income_col] / df[revenue_col]) * 100 # 컬럼명 유지
-        df['Op Margin (%)'] = df['Op Margin (%)'].round(2)
-
-        res = df[['Op Margin (%)']].reset_index().rename(columns={'index':'Date'})
-        res['Date'] = res['Date'].dt.strftime('%Y-%m-%d')
-        logging.info(f"{ticker}: {len(res)}개 영업이익률 계산 완료 (yfinance).")
-        return res.to_dict('records')
+        data = get_income_statement(ticker, limit=num_periods)
+        records = []
+        for item in reversed(data):  # 최근 → 오래된 순으로 정렬
+            revenue = item.get("revenue")
+            op_income = item.get("operatingIncome")
+            if revenue and op_income and revenue != 0:
+                margin = round((op_income / revenue) * 100, 2)
+                records.append({"Date": item["date"], "Op Margin (%)": margin})
+        return records
     except Exception as e:
-        logging.error(f"{ticker}: 영업이익률 계산 오류 (yfinance): {e}")
-        return None
+        logging.error(f"{ticker}: 영업이익률 계산 오류 - {e}")
+        return []
+
+from fmp_api import get_income_statement, get_balance_sheet
 
 def get_roe_trend(ticker, num_periods=4):
-    """최근 분기별 ROE(%) 추세 계산 (yfinance)"""
-    # TODO: FMP Integration - Replace yfinance calls with FMP income statement and balance sheet endpoints
-    logging.info(f"{ticker}: ROE 추세 ({num_periods}분기) using yfinance...")
+    """FMP 기반 최근 분기별 ROE(%) 추세"""
     try:
-        stock = yf.Ticker(ticker)
-        qf = stock.quarterly_financials
-        qbs = stock.quarterly_balance_sheet
-        if qf.empty or qbs.empty:
-            logging.warning(f"{ticker}: 분기 재무/대차대조표 없음 (yfinance).")
-            return None
+        income_data = get_income_statement(ticker, limit=num_periods)
+        balance_data = get_balance_sheet(ticker, limit=num_periods)
 
-        ni_col = find_financial_statement_item(qf.index, ['Net', 'Income'], ['Net Income', 'Net Income Common Stockholders']) # 후보 축소
-        eq_col = find_financial_statement_item(qbs.index, ['Stockholder', 'Equity'], ['Total Stockholder Equity']) or find_financial_statement_item(qbs.index, ['Total', 'Equity'])
-        if not ni_col or not eq_col:
-            logging.warning(f"{ticker}: 순이익/자본 항목 못찾음 (yfinance).")
-            return None
+        if not income_data or not balance_data:
+            return []
 
-        qf_r = qf.loc[[ni_col]].iloc[:, :num_periods].T
-        qbs_r = qbs.loc[[eq_col]].iloc[:, :num_periods].T
-        df = pd.merge(qf_r, qbs_r, left_index=True, right_index=True, how='outer').sort_index()
-        df.index = pd.to_datetime(df.index)
+        # date 기준으로 정렬된 dict 생성 (→ 빠른 매칭용)
+        equity_map = {b['date']: b.get('totalStockholdersEquity') or b.get('totalEquity') for b in balance_data}
 
-        df[ni_col] = pd.to_numeric(df[ni_col], errors='coerce')
-        df[eq_col] = pd.to_numeric(df[eq_col], errors='coerce')
-        df[eq_col] = df[eq_col].apply(lambda x: x if pd.notna(x) and x > 0 else np.nan)
-        df.dropna(subset=[ni_col, eq_col], inplace=True)
-
-        if df.empty:
-            logging.warning(f"{ticker}: ROE 계산 데이터 부족 (yfinance).")
-            return None
-
-        df['ROE (%)'] = (df[ni_col] / df[eq_col]) * 100
-        df['ROE (%)'] = df['ROE (%)'].round(2)
-
-        res = df[['ROE (%)']].reset_index().rename(columns={'index':'Date'})
-        res['Date'] = res['Date'].dt.strftime('%Y-%m-%d')
-        logging.info(f"{ticker}: {len(res)}개 ROE 계산 완료 (yfinance).")
-        return res.to_dict('records')
+        records = []
+        for item in income_data:
+            date = item.get("date")
+            ni = item.get("netIncome")
+            equity = equity_map.get(date)
+            if ni is not None and equity and equity != 0:
+                roe = round((ni / equity) * 100, 2)
+                records.append({"Date": date, "ROE (%)": roe})
+        return list(reversed(records))  # 최근 → 과거 순서
     except Exception as e:
-        logging.error(f"{ticker}: ROE 계산 오류 (yfinance): {e}")
-        return None
+        logging.error(f"{ticker}: ROE 계산 오류 - {e}")
+        return []
+
+from fmp_api import get_balance_sheet
 
 def get_debt_to_equity_trend(ticker, num_periods=4):
-    """최근 분기별 부채비율(D/E Ratio) 추세 계산 (yfinance)"""
-    # TODO: FMP Integration - Replace yfinance calls with FMP balance sheet endpoint
-    logging.info(f"{ticker}: 부채비율 추세 ({num_periods}분기) using yfinance...")
+    """FMP 기반 부채비율(D/E Ratio) 추세 계산"""
     try:
-        stock = yf.Ticker(ticker)
-        qbs = stock.quarterly_balance_sheet
-        if qbs.empty:
-            logging.warning(f"{ticker}: 분기 대차대조표 없음 (yfinance).")
-            return None
+        bs_data = get_balance_sheet(ticker, limit=num_periods)
+        if not bs_data:
+            return []
 
-        eq_col = find_financial_statement_item(qbs.index, ['Stockholder', 'Equity'], ['Total Stockholder Equity']) or find_financial_statement_item(qbs.index, ['Total', 'Equity'])
-        if not eq_col:
-            logging.warning(f"{ticker}: 자본 항목 못찾음 (yfinance).")
-            return None
+        records = []
+        for item in reversed(bs_data):  # 최근 → 오래된 순으로
+            date = item.get("date")
+            equity = item.get("totalStockholdersEquity") or item.get("totalEquity")
+            debt = item.get("totalDebt")
 
-        td_col = find_financial_statement_item(qbs.index, ['Total', 'Debt'])
-        sd_col = find_financial_statement_item(qbs.index, ['Current', 'Debt']) # yfinance might use 'Total Current Liabilities'? check FMP names
-        ld_col = find_financial_statement_item(qbs.index, ['Long', 'Term', 'Debt'])
+            # fallback: 총부채가 없을 경우, 단기+장기로 계산
+            if debt is None:
+                st_debt = item.get("shortTermDebt") or 0
+                lt_debt = item.get("longTermDebt") or 0
+                debt = st_debt + lt_debt
 
-        req_cols = [eq_col]
-        use_td = False
-        calc_d = False
-
-        # Logic to find debt needs careful mapping for FMP fields (e.g., totalDebt, shortTermDebt, longTermDebt)
-        if td_col:
-            req_cols.append(td_col)
-            use_td = True
-            logging.info(f"{ticker}: Total Debt 사용 (yfinance).")
-        elif sd_col and ld_col:
-            req_cols.extend([sd_col, ld_col])
-            calc_d = True
-            logging.info(f"{ticker}: 단기+장기 부채 합산 (yfinance).")
-        else:
-             # Try finding Total Liabilities as a fallback proxy for debt if specific debt not found
-             tl_col = find_financial_statement_item(qbs.index, ['Total', 'Liabilities'])
-             if tl_col:
-                 logging.warning(f"{ticker}: 특정 부채 항목 못찾아 Total Liabilities 사용 (yfinance).")
-                 req_cols.append(tl_col)
-                 # Need a way to signal using total liabilities instead of debt
-                 use_td = True # Re-use this flag logic, but td_col points to liabilities now
-                 td_col = tl_col # Assign liability column to td_col for processing
-             else:
-                logging.warning(f"{ticker}: 총부채/총부채 항목 못찾음 (yfinance).")
-                return None
-
-
-        req_cols = list(set(req_cols))
-        qbs_r = qbs.loc[req_cols].iloc[:, :num_periods].T
-        df = qbs_r.copy()
-        df.index = pd.to_datetime(df.index)
-        df = df.sort_index()
-
-        for col in req_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        df[eq_col] = df[eq_col].apply(lambda x: x if pd.notna(x) and x != 0 else np.nan)
-
-        # Debt calculation logic based on available columns
-        debt_col_used = None
-        if use_td and td_col in df.columns:
-            df['Calc Debt'] = df[td_col]
-            debt_col_used = td_col
-        elif calc_d and sd_col in df.columns and ld_col in df.columns:
-            df['Calc Debt'] = df[sd_col].fillna(0) + df[ld_col].fillna(0)
-            debt_col_used = f"{sd_col}+{ld_col}"
-        else:
-            logging.error(f"{ticker}: 부채비율 계산 위한 부채 컬럼 설정 실패.")
-            return None
-
-        df.dropna(subset=['Calc Debt', eq_col], inplace=True)
-
-        if df.empty:
-            logging.warning(f"{ticker}: 부채비율 계산 데이터 부족 (yfinance).")
-            return None
-
-        df['D/E Ratio'] = df['Calc Debt'] / df[eq_col]
-        df['D/E Ratio'] = df['D/E Ratio'].round(2)
-
-        res = df[['D/E Ratio']].reset_index().rename(columns={'index':'Date'})
-        res['Date'] = res['Date'].dt.strftime('%Y-%m-%d')
-        logging.info(f"{ticker}: {len(res)}개 부채비율 ({debt_col_used}/{eq_col}) 계산 완료 (yfinance).")
-        return res.to_dict('records')
+            if equity and equity != 0 and debt is not None:
+                ratio = round(debt / equity, 2)
+                records.append({"Date": date, "D/E Ratio": ratio})
+        return records
     except Exception as e:
-        logging.error(f"{ticker}: 부채비율 계산 오류 (yfinance): {e}")
-        return None
-
+        logging.error(f"{ticker}: 부채비율 계산 오류 - {e}")
+        return []
 
 def get_current_ratio_trend(ticker, num_periods=4):
-    """최근 분기별 유동비율 추세 계산 (yfinance)"""
-    # TODO: FMP Integration - Replace yfinance calls with FMP balance sheet endpoint
-    logging.info(f"{ticker}: 유동비율 추세 ({num_periods}분기) using yfinance...")
+    """FMP 기반 유동비율(Current Ratio) 추세 계산"""
     try:
-        stock = yf.Ticker(ticker)
-        qbs = stock.quarterly_balance_sheet
-        if qbs.empty:
-            logging.warning(f"{ticker}: 분기 대차대조표 없음 (yfinance).")
-            return None
-        # FMP names might be 'totalCurrentAssets', 'totalCurrentLiabilities'
-        ca_col = find_financial_statement_item(qbs.index, ['Total', 'Current', 'Assets'])
-        cl_col = find_financial_statement_item(qbs.index, ['Total', 'Current', 'Liabilities'])
-        if not ca_col or not cl_col:
-            logging.warning(f"{ticker}: 유동자산/부채 항목 못찾음 (yfinance).")
-            return None
-        if ca_col == cl_col:
-            logging.error(f"{ticker}: 유동자산/부채 항목 동일 식별('{ca_col}') (yfinance).")
-            return None
+        bs_data = get_balance_sheet(ticker, limit=num_periods)
+        if not bs_data:
+            return []
 
-        req_cols = [ca_col, cl_col]
-        qbs_r = qbs.loc[req_cols].iloc[:, :num_periods].T
-        df = qbs_r.copy()
-        df.index = pd.to_datetime(df.index)
-        df = df.sort_index()
+        records = []
+        for item in reversed(bs_data):  # 최근 → 오래된 순서
+            date = item.get("date")
+            current_assets = item.get("totalCurrentAssets")
+            current_liabilities = item.get("totalCurrentLiabilities")
 
-        df[ca_col] = pd.to_numeric(df[ca_col], errors='coerce')
-        df[cl_col] = pd.to_numeric(df[cl_col], errors='coerce')
-
-        df[cl_col] = df[cl_col].apply(lambda x: x if pd.notna(x) and x > 0 else np.nan)
-        df.dropna(subset=[ca_col, cl_col], inplace=True)
-
-        if df.empty:
-            logging.warning(f"{ticker}: 유동비율 계산 데이터 부족 (yfinance).")
-            return None
-
-        df['Current Ratio'] = df[ca_col] / df[cl_col]
-        df['Current Ratio'] = df['Current Ratio'].round(2)
-
-        res = df[['Current Ratio']].reset_index().rename(columns={'index':'Date'})
-        res['Date'] = res['Date'].dt.strftime('%Y-%m-%d')
-        logging.info(f"{ticker}: {len(res)}개 유동비율 계산 완료 (yfinance).")
-        return res.to_dict('records')
+            if current_assets and current_liabilities and current_liabilities != 0:
+                ratio = round(current_assets / current_liabilities, 2)
+                records.append({"Date": date, "Current Ratio": ratio})
+        return records
     except Exception as e:
-        logging.error(f"{ticker}: 유동비율 계산 오류 (yfinance): {e}")
-        return None
+        logging.error(f"{ticker}: 유동비율 계산 오류 - {e}")
+        return []
 
 # --- 분석 및 시각화 함수들 ---
 def plot_stock_chart(ticker, start_date=None, end_date=None, period="1y"):

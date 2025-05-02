@@ -36,3 +36,11 @@ def get_profile(ticker: str):
 @st.cache_data(ttl=1800)
 def get_news(ticker: str, limit: int = 10):
     return _request("stock_news", {"tickers": ticker, "limit": limit})
+
+@st.cache_data(ttl=3600)
+def get_income_statement(ticker: str, limit: int = 4):
+    return _request(f"income-statement/{ticker}", {"period": "quarter", "limit": limit})
+
+@st.cache_data(ttl=3600)
+def get_balance_sheet(ticker: str, limit: int = 4):
+    return _request(f"balance-sheet-statement/{ticker}", {"period": "quarter", "limit": limit})
