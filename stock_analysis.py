@@ -23,6 +23,8 @@ import warnings
 import locale
 import re
 import pandas_ta as ta
+import streamlit as st
+
 # Import specific FMP functions for clarity
 from fmp_api import (
     get_income_statement, get_balance_sheet, get_profile, get_quote_bulk,
