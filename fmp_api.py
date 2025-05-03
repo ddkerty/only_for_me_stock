@@ -22,17 +22,26 @@ def _request(endpoint: str, params: dict | None = None):
     return resp.json()
 
 # ──────── 래퍼 함수 ────────
-@st.cache_data(ttl=3600) # 캐싱 다시 적용
-def get_price_data(ticker: str, start_date: str, end_date: str): # <-- start_date, end_date 인자 받도록 수정
-    """지정된 기간의 일별 주가 데이터(OHLCV)를 FMP API로부터 가져옵니다."""
+@st.cache_data(ttl=3600)
+def get_price_data(ticker: str, start_date: str, end_date: str):
+    """
+    지정된 기간의 일별 주가 데이터(OHLCV)를 FMP API로부터 가져옵니다.
+    Args:
+        ticker (str): 주식 티커
+        start_date (str): 시작일 (YYYY-MM-DD 형식)
+        end_date (str): 종료일 (YYYY-MM-DD 형식)
+    Returns:
+        list: FMP API의 'historical' 데이터를 담은 리스트 (없으면 빈 리스트)
+    """
     logging.info(f"fmp_api: Requesting historical price for {ticker} from {start_date} to {end_date}")
     try:
-        # _request 함수에 start_date, end_date를 from/to 파라미터로 전달
+        # _request 함수에 "from"과 "to" 파라미터를 정확히 전달
         data = _request(f"historical-price-full/{ticker}", {"from": start_date, "to": end_date})
+        # FMP 응답 구조에 따라 'historical' 키 확인 (V3 기준)
         return data.get("historical", [])
     except requests.exceptions.RequestException as req_err:
         logging.error(f"FMP API historical price request failed for {ticker}: {req_err}")
-        return []
+        return [] # 오류 시 빈 리스트 반환
     except Exception as e:
         logging.error(f"Error processing historical price for {ticker}: {e}")
         return []
