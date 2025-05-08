@@ -1,6 +1,8 @@
+# dart.py 상단 수정
+import streamlit as st # Streamlit 임포트 추가
 import httpx
 from typing import Any, Dict, List, Optional, Tuple, Set
-from mcp.server.fastmcp import FastMCP, Context
+# from mcp.server.fastmcp import FastMCP, Context # MCP 관련 코드는 Streamlit 앱에서는 불필요할 수 있음 (주석 처리 또는 삭제 고려)
 import os
 import zipfile
 import xml.etree.ElementTree as ET
@@ -9,15 +11,14 @@ import re
 import traceback
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import streamlit as st # Streamlit 임포트 추가
-import os
-from dotenv import load_dotenv
 
 
 load_dotenv()
 # 상수 정의
 # API 설정
-API_KEY = os.environ.get("DART_API_KEY")  # 환경 변수에서 API 키 로드, 없으면 기본값 사용
+API_KEY = os.environ.get("DART_API_KEY")  # 환경 변수에서 API 키 로드, 없으면 기본값 사용'
+if not API_KEY and hasattr(st, 'secrets'): # 2. 환경 변수 없고 secrets 사용 가능하면
+    API_KEY = st.secrets.get("DART_API_KEY") # 3. Streamlit secrets에서 직접 읽기
 BASE_URL = "https://opendart.fss.or.kr/api"
 
 # 보고서 코드
