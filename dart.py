@@ -9,6 +9,9 @@ import re
 import traceback
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import streamlit as st # Streamlit 임포트 추가
+import os
+from dotenv import load_dotenv
 
 
 load_dotenv()
