@@ -1,22 +1,27 @@
-# fmp_api.py ─ 최종
-
+# fmp_api.py 수정 제안 (테스트용)
 import os, logging, requests, streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
-FMP_API_KEY = os.getenv("FMP_API_KEY") or st.secrets.get("FMP_API_KEY")
-BASE_URL    = "https://financialmodelingprep.com/api/v3"
+# FMP_API_KEY = os.getenv("FMP_API_KEY") or st.secrets.get("FMP_API_KEY") # 이 라인 주석 처리 또는 삭제
 
+BASE_URL    = "https://financialmodelingprep.com/api/v3"
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "TechnutStock/1.0"})
 
+def get_fmp_api_key(): # API 키를 가져오는 함수 추가
+    key = os.getenv("FMP_API_KEY")
+    if not key and hasattr(st, 'secrets'):
+         key = st.secrets.get("FMP_API_KEY")
+    return key
+
 def _request(endpoint: str, params: dict | None = None):
+    FMP_API_KEY = get_fmp_api_key() # 함수 호출 시 키 로드
     if not FMP_API_KEY:
         raise EnvironmentError("FMP_API_KEY not set")
     params = params or {}
     params["apikey"] = FMP_API_KEY
     url = f"{BASE_URL}/{endpoint}"
-
     resp = SESSION.get(url, params=params, timeout=10)
     resp.raise_for_status()
     return resp.json()
