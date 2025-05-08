@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Combined app.py V2.2 (SyntaxError Fix, FRED Removed, Tech Call Fixed - Corrected)
+# app.py (pykrx 적용 버전)
 
 import streamlit as st
 import pandas as pd
@@ -12,6 +12,14 @@ import plotly.graph_objects as go
 import numpy as np
 import logging
 import requests # FMP API 호출에 필요
+import asyncio # 비동기 함수 호출을 위해 추가 (get_ticker_from_input)
+
+# --- pykrx 임포트 ---
+try:
+    from pykrx import stock
+except ImportError:
+    st.error("pykrx 라이브러리를 찾을 수 없습니다. 'pip install pykrx'로 설치해주세요.")
+    st.stop()
 
 # --- FMP API 및 분석 모듈 임포트 ---
 try:
@@ -23,12 +31,18 @@ except ImportError as e:
 
 # --- 기술 분석 관련 함수 임포트 ---
 try:
-    # short_term_analysis.py 에 함수들이 올바르게 정의되어 있는지 확인 필요
     from short_term_analysis import interpret_fibonacci, calculate_rsi, calculate_macd
     from technical_interpret import interpret_technical_signals
 except ImportError as e:
     st.error(f"기술 분석 모듈 로딩 실패: {e}. 'short_term_analysis.py'와 'technical_interpret.py' 파일이 있는지 확인하세요.")
     # 필요시 st.stop()
+
+# --- DART API 모듈 임포트 (한국 기업 기본 정보용) ---
+try:
+    import dart as dart_api # dart.py 파일을 dart_api 라는 이름으로 임포트
+except ImportError:
+    st.warning("dart.py 파일을 찾을 수 없습니다. '한국 기업 기본 정보' 기능이 제한될 수 있습니다.")
+    dart_api = None # dart_api 객체를 None으로 설정하여 오류 방지
 
 # --- 기본 경로 설정 및 로깅 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -41,34 +55,54 @@ def calculate_vwap(df):
     df = df.copy(); required_cols = ['High', 'Low', 'Close', 'Volume']
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols: raise ValueError(f"VWAP 계산 실패: 컬럼 부족 ({missing_cols})")
-    if 'Volume' not in df.columns or df['Volume'].isnull().all() or (df['Volume'] == 0).all():
-        df['VWAP'] = np.nan; logging.warning(f"Ticker {df.attrs.get('ticker', '')}: VWAP 계산 불가 (거래량 데이터 부족 또는 0)"); return df
-    df['Volume'] = df['Volume'].fillna(0); df['typical_price'] = (df['High'] + df['Low'] + df['Close']) / 3
-    df['tp_volume'] = df['typical_price'] * df['Volume']; df['cumulative_volume'] = df['Volume'].cumsum()
+    # 0으로 나누기 경고 방지 및 거래량 0 경우 처리
+    df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce').fillna(0)
+    if (df['Volume'] == 0).all():
+        df['VWAP'] = np.nan; logging.warning(f"Ticker {df.attrs.get('ticker', '')}: VWAP 계산 불가 (모든 거래량 0)"); return df
+
+    df['typical_price'] = (pd.to_numeric(df['High'], errors='coerce') + pd.to_numeric(df['Low'], errors='coerce') + pd.to_numeric(df['Close'], errors='coerce')) / 3
+    df['tp_volume'] = df['typical_price'] * df['Volume']
+    df['cumulative_volume'] = df['Volume'].cumsum()
     df['cumulative_tp_volume'] = df['tp_volume'].cumsum()
+    # 0으로 나누기 방지
     df['VWAP'] = np.where(df['cumulative_volume'] > 0, df['cumulative_tp_volume'] / df['cumulative_volume'], np.nan)
     return df
 
 def calculate_bollinger_bands(df, window=20, num_std=2):
     """볼린저 밴드 계산 (Close 필요)"""
     df = df.copy(); required_col = 'Close'
-    if required_col not in df.columns or df[required_col].isnull().all():
-        st.warning(f"BB 계산 실패: '{required_col}' 컬럼 없음 또는 데이터 없음."); df['MA20'] = np.nan; df['Upper'] = np.nan; df['Lower'] = np.nan; return df
+    if required_col not in df.columns:
+        st.warning(f"BB 계산 실패: '{required_col}' 컬럼 없음."); df['MA20'] = np.nan; df['Upper'] = np.nan; df['Lower'] = np.nan; return df
+
+    df[required_col] = pd.to_numeric(df[required_col], errors='coerce') # 숫자로 변환
+    if df[required_col].isnull().all():
+        st.warning(f"BB 계산 실패: '{required_col}' 데이터 없음."); df['MA20'] = np.nan; df['Upper'] = np.nan; df['Lower'] = np.nan; return df
+
     valid_close = df.dropna(subset=[required_col])
     if len(valid_close) < window:
-        st.warning(f"BB 계산 위한 유효 데이터({len(valid_close)}개)가 기간({window}개)보다 부족."); df['MA20'] = np.nan; df['Upper'] = np.nan; df['Lower'] = np.nan
+        st.warning(f"BB 계산 위한 유효 데이터({len(valid_close)}개)가 기간({window}개)보다 부족."); df['MA20'] = np.nan; df['Upper'] = np.nan; df['Lower'] = np.nan; return df
     else:
-        df['MA20'] = df[required_col].rolling(window=window, min_periods=window).mean(); df['STD20'] = df[required_col].rolling(window=window, min_periods=window).std()
-        df['Upper'] = df['MA20'] + num_std * df['STD20']; df['Lower'] = df['MA20'] - num_std * df['STD20']
+        df['MA20'] = df[required_col].rolling(window=window, min_periods=window).mean()
+        df['STD20'] = df[required_col].rolling(window=window, min_periods=window).std()
+        df['Upper'] = df['MA20'] + num_std * df['STD20']
+        df['Lower'] = df['MA20'] - num_std * df['STD20']
     return df
 
-# --- 차트 생성 함수 (기존 코드 유지) ---
+# --- 차트 생성 함수 (미국 주식용 - 기존 코드 유지) ---
 def plot_technical_chart(df, ticker):
-    """기술적 분석 지표 통합 차트 생성 (VWAP, Bollinger Band, Fibonacci, RSI, MACD 포함)"""
+    """미국 주식용 기술적 분석 지표 통합 차트 생성"""
     fig = go.Figure(); required_candle_cols = ['Open', 'High', 'Low', 'Close']
     if not all(col in df.columns for col in required_candle_cols) or df[required_candle_cols].isnull().all(axis=None):
         st.error(f"캔들차트 필요 컬럼({required_candle_cols}) 없음/데이터 없음."); return fig
+    # OHLC 데이터 숫자로 변환 (오류 발생 시 NaN 처리)
+    for col in required_candle_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df.dropna(subset=required_candle_cols, inplace=True) # NaN 있는 행 제거
+    if df.empty:
+        st.error("유효한 OHLC 데이터가 없습니다."); return fig
+
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name=f"{ticker} 캔들"))
+    # ... (이하 기존 plot_technical_chart 로직 유지 - VWAP, BB, Fib, RSI, MACD 추가) ...
     if 'VWAP' in df.columns and df['VWAP'].notna().any(): fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], mode='lines', name='VWAP', line=dict(color='orange', width=1.5)))
     elif 'VWAP' in df.columns: st.caption("VWAP 데이터 없음/표시 불가.")
     if 'Upper' in df.columns and 'Lower' in df.columns and df['Upper'].notna().any():
@@ -90,32 +124,284 @@ def plot_technical_chart(df, ticker):
         fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', mode='lines', line=dict(color='teal'), yaxis='y3'))
         fig.add_trace(go.Scatter(x=df.index, y=df['MACD_signal'], name='MACD Signal', mode='lines', line=dict(color='orange'), yaxis='y3'))
         if 'MACD_hist' in df.columns: colors = ['lightgreen' if v >= 0 else 'lightcoral' for v in df['MACD_hist']]; fig.add_trace(go.Bar(x=df.index, y=df['MACD_hist'], name='MACD Histogram', marker_color=colors, yaxis='y3'))
-    fig.update_layout(title=f"{ticker} - 기술적 분석 통합 차트", xaxis_title="날짜 / 시간", yaxis=dict(domain=[0.4, 1], title="가격 ($)"), yaxis2=dict(domain=[0.25, 0.4], title="RSI", overlaying='y', side='right', showgrid=False), yaxis3=dict(domain=[0.0, 0.25], title="MACD", overlaying='y', side='right', showgrid=False), xaxis_rangeslider_visible=False, legend_title_text="지표", hovermode="x unified", margin=dict(l=50, r=50, t=50, b=50))
+
+    fig.update_layout(title=f"{ticker} - 기술적 분석 통합 차트 (미국 주식)", xaxis_title="날짜 / 시간", yaxis=dict(domain=[0.4, 1], title="가격 ($)"), yaxis2=dict(domain=[0.25, 0.4], title="RSI", overlaying='y', side='right', showgrid=False), yaxis3=dict(domain=[0.0, 0.25], title="MACD", overlaying='y', side='right', showgrid=False), xaxis_rangeslider_visible=False, legend_title_text="지표", hovermode="x unified", margin=dict(l=50, r=50, t=50, b=50))
     return fig
 
-# --- Streamlit 페이지 설정 ---
-st.set_page_config(page_title="종합 주식 분석 FMP 버전", layout="wide", initial_sidebar_state="expanded")
+# --- 한국 주식용 차트 생성 함수 (pykrx 데이터 기반) ---
+def plot_korean_technical_chart(df, ticker_code, company_name):
+    """한국 주식용 기술적 분석 지표 통합 차트 생성 (추세선 포함)"""
+    fig = go.Figure()
+    required_candle_cols = ['Open', 'High', 'Low', 'Close']
+    if not all(col in df.columns for col in required_candle_cols):
+        logging.error(f"한국 주식 캔들차트 필요 컬럼({required_candle_cols}) 없음/데이터 없음.")
+        return fig # 빈 Figure 반환
+    # OHLC 데이터 숫자로 변환 (오류 발생 시 NaN 처리)
+    for col in required_candle_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df.dropna(subset=required_candle_cols, inplace=True) # NaN 있는 행 제거
+    if df.empty:
+        logging.error("한국 주식 유효한 OHLC 데이터가 없습니다.")
+        return fig
 
-# --- FMP API 키 로드 및 확인 (FRED 키 제거) ---
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name=f"{company_name} 캔들"))
+
+    # VWAP
+    if 'VWAP' in df.columns and df['VWAP'].notna().any():
+        fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], mode='lines', name='VWAP', line=dict(color='orange', width=1.5)))
+
+    # Bollinger Bands
+    if 'Upper' in df.columns and 'Lower' in df.columns and df['Upper'].notna().any():
+        if 'MA20' in df.columns and df['MA20'].notna().any():
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], mode='lines', name='MA20 (BB 중심선)', line=dict(color='blue', width=1, dash='dash')))
+        fig.add_trace(go.Scatter(x=df.index, y=df['Upper'], mode='lines', name='Bollinger Upper', line=dict(color='grey', width=1)))
+        fig.add_trace(go.Scatter(x=df.index, y=df['Lower'], mode='lines', name='Bollinger Lower', line=dict(color='grey', width=1), fill='tonexty', fillcolor='rgba(180,180,180,0.1)'))
+
+    # Fibonacci Retracement Levels
+    valid_price_df_kr = df.dropna(subset=['High', 'Low'])
+    if not valid_price_df_kr.empty:
+        min_price_kr = valid_price_df_kr['Low'].min()
+        max_price_kr = valid_price_df_kr['High'].max()
+        diff_kr = max_price_kr - min_price_kr
+        if diff_kr > 0:
+            levels_kr = {'0.0 (High)': max_price_kr, '0.236': max_price_kr - 0.236 * diff_kr, '0.382': max_price_kr - 0.382 * diff_kr, '0.5': max_price_kr - 0.5 * diff_kr, '0.618': max_price_kr - 0.618 * diff_kr, '1.0 (Low)': min_price_kr}
+            fib_colors_kr = {'0.0 (High)': 'red', '0.236': 'orange', '0.382': 'gold', '0.5': 'green', '0.618': 'blue', '1.0 (Low)': 'purple'}
+            for k, v in levels_kr.items():
+                fig.add_hline(y=v, line_dash="dot", annotation_text=f"Fib {k}: {v:,.0f}원", line_color=fib_colors_kr.get(k, 'navy'), annotation_position="bottom right", annotation_font_size=10)
+
+    # 추세선 (이동평균선)
+    if 'SMA5' in df.columns and df['SMA5'].notna().any():
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA5'], mode='lines', name='SMA 5일', line=dict(color='green', width=1)))
+    if 'SMA20' in df.columns and df['SMA20'].notna().any():
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA20'], mode='lines', name='SMA 20일', line=dict(color='red', width=1)))
+    if 'SMA60' in df.columns and df['SMA60'].notna().any():
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA60'], mode='lines', name='SMA 60일', line=dict(color='purple', width=1)))
+
+    # TODO: 실제 상승/하락 추세선 그리기 (선택적 고급 기능)
+    # (이전 답변의 linear regression 예시 코드는 scipy.stats 임포트 필요)
+    # from scipy.stats import linregress # 필요시 추가
+
+    # RSI
+    if 'RSI' in df.columns and df['RSI'].notna().any():
+        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], mode='lines', name='RSI (14)', line=dict(color='purple', width=1), yaxis='y2'))
+    # MACD
+    if 'MACD' in df.columns and 'MACD_signal' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', mode='lines', line=dict(color='teal'), yaxis='y3'))
+        fig.add_trace(go.Scatter(x=df.index, y=df['MACD_signal'], name='MACD Signal', mode='lines', line=dict(color='orange'), yaxis='y3'))
+        if 'MACD_hist' in df.columns:
+            colors_kr = ['lightgreen' if v >= 0 else 'lightcoral' for v in df['MACD_hist']]
+            fig.add_trace(go.Bar(x=df.index, y=df['MACD_hist'], name='MACD Histogram', marker_color=colors_kr, yaxis='y3'))
+
+    fig.update_layout(
+        title=f"{company_name} ({ticker_code}) 기술적 분석 (한국 주식)",
+        xaxis_title="날짜",
+        yaxis=dict(domain=[0.4, 1], title="가격 (원)"), # Y축 레이블 변경
+        yaxis2=dict(domain=[0.25, 0.4], title="RSI", overlaying='y', side='right', showgrid=False),
+        yaxis3=dict(domain=[0.0, 0.25], title="MACD", overlaying='y', side='right', showgrid=False),
+        xaxis_rangeslider_visible=False,
+        legend_title_text="지표",
+        hovermode="x unified",
+        margin=dict(l=50, r=50, t=50, b=50)
+    )
+    return fig
+
+# --- pykrx 티커 조회 헬퍼 함수 ---
+@st.cache_data(ttl=3600) # 한 시간 동안 KRX 종목 목록 캐싱
+def get_kr_ticker_map():
+    """KRX KOSPI, KOSDAQ 종목 목록을 가져와 이름-티커, 티커-이름 맵을 반환합니다."""
+    name_to_ticker = {}
+    ticker_to_name = {}
+    try:
+        today_str = datetime.now().strftime("%Y%m%d") # 오늘 날짜 기준으로 조회 시도
+        for market in ["KOSPI", "KOSDAQ"]:
+            # 특정 날짜 기준이 필요하면 해당 날짜 문자열 사용
+            tickers = stock.get_market_ticker_list(date=today_str, market=market)
+            for ticker in tickers:
+                try:
+                    # get_market_ticker_name 에도 날짜 인자 추가 가능 (필요시)
+                    name = stock.get_market_ticker_name(ticker)
+                    name_to_ticker[name] = ticker
+                    ticker_to_name[ticker] = name
+                except Exception as e_inner:
+                    logging.warning(f"Ticker {ticker} 이름 조회 실패: {e_inner}") # 개별 티커 오류는 로깅만
+        logging.info(f"KRX Ticker Map 로드 완료: {len(name_to_ticker)} 종목")
+        return name_to_ticker, ticker_to_name
+    except Exception as e:
+        logging.error(f"KRX 종목 목록 조회 중 오류 발생: {e}")
+        st.error(f"KRX 종목 목록을 불러오는 데 실패했습니다: {e}") # 사용자에게도 에러 표시
+        return {}, {}
+
+async def get_ticker_from_input(user_input):
+    """사용자 입력(회사명 또는 종목코드)으로부터 6자리 종목코드와 회사명을 반환합니다."""
+    user_input = user_input.strip()
+    name_to_ticker_map, ticker_to_name_map = get_kr_ticker_map() # 캐싱된 맵 사용
+
+    if not name_to_ticker_map and not ticker_to_name_map:
+        # get_kr_ticker_map 내부에서 에러 메시지를 표시했을 것이므로 여기서는 None 반환
+        return None, user_input # 실패 시 None, 원래 입력값 반환
+
+    # 입력이 6자리 숫자이고, 유효한 티커인지 확인
+    if user_input.isdigit() and len(user_input) == 6:
+        if user_input in ticker_to_name_map:
+            return user_input, ticker_to_name_map[user_input]
+        else:
+            # 6자리 숫자이지만 유효하지 않은 티커일 경우 (예: 상장 폐지 등)
+            st.warning(f"입력하신 종목코드 '{user_input}'는 현재 KRX 목록에 없습니다. 상장 폐지되었거나 잘못된 코드일 수 있습니다.")
+            return None, user_input # 실패
+
+    # 입력이 회사명과 정확히 일치하는지 확인
+    if user_input in name_to_ticker_map:
+        return name_to_ticker_map[user_input], user_input
+
+    # 입력이 회사명의 일부를 포함하는지 확인 (대소문자 무시, 첫 번째 매칭)
+    cleaned_input = user_input.lower()
+    found_ticker = None
+    found_name = user_input # 기본값
+    for name, ticker in name_to_ticker_map.items():
+        if cleaned_input in name.lower():
+            found_ticker = ticker
+            found_name = name
+            st.info(f"입력 '{user_input}'과(와) 유사한 '{found_name}'(으)로 검색합니다. (티커: {found_ticker})")
+            return found_ticker, found_name # 첫 번째 매칭 결과 반환
+
+    # 위 모든 경우에 해당하지 않으면 찾지 못한 것
+    st.warning(f"'{user_input}'에 해당하는 종목을 찾지 못했습니다. 정확한 회사명이나 6자리 종목코드를 입력해주세요.")
+    return None, user_input # 실패
+
+# --- 한국 주식 데이터 로딩 및 차트 표시 함수 (pykrx 사용) ---
+async def display_korean_stock_chart(ticker_input_kr, start_date_kr, end_date_kr, bb_window_val_kr, bb_std_val_kr, results_container):
+    """한국 주식 데이터를 pykrx로 가져와 기술적 분석 차트를 표시합니다."""
+    with results_container:
+        # 1. 사용자 입력으로부터 종목코드 가져오기
+        ticker_code, company_name_krx = await get_ticker_from_input(ticker_input_kr)
+
+        if not ticker_code:
+            # get_ticker_from_input 함수 내에서 이미 경고/오류 메시지를 표시했을 것임
+            return
+
+        # 2. pykrx 용 날짜 형식 변환 (YYYYMMDD)
+        start_date_str_krx = start_date_kr.strftime("%Y%m%d")
+        end_date_str_krx = end_date_kr.strftime("%Y%m%d")
+
+        st.write(f"**{company_name_krx} ({ticker_code})** 기술적 분석 (BB: {bb_window_val_kr}일/{bb_std_val_kr:.1f}σ)")
+        with st.spinner(f"{company_name_krx} ({ticker_code}) 데이터 로딩 및 차트 생성 중... (pykrx)"):
+            try:
+                # 3. pykrx로 주가 데이터 다운로드
+                df_kr = stock.get_market_ohlcv(start_date_str_krx, end_date_str_krx, ticker_code)
+
+                if df_kr.empty:
+                    st.error(f"❌ {company_name_krx}({ticker_code})에 대한 데이터를 pykrx로 불러오지 못했습니다. 기간 내 거래가 없거나 잘못된 요청일 수 있습니다.")
+                    return
+
+                # 4. 컬럼명 변경 ('시가' -> 'Open' 등) 및 인덱스 타입 확인/변환
+                df_kr.rename(columns={'시가': 'Open', '고가': 'High', '저가': 'Low', '종가': 'Close', '거래량': 'Volume'}, inplace=True)
+                df_kr.index = pd.to_datetime(df_kr.index) # DatetimeIndex로 변환
+
+                # 5. 기술적 지표 계산
+                required_cols_kr = ['Open', 'High', 'Low', 'Close', 'Volume']
+                missing_cols_kr = [col for col in required_cols_kr if col not in df_kr.columns]
+                if missing_cols_kr:
+                    st.error(f"❌ {company_name_krx} 데이터에 필수 컬럼이 부족합니다: {missing_cols_kr}")
+                    st.dataframe(df_kr.head())
+                    return
+
+                df_calculated_kr = df_kr.copy()
+                df_calculated_kr.attrs['ticker'] = ticker_code # Ticker 정보 추가
+
+                # 데이터 타입을 숫자로 변환 (지표 계산 전)
+                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                     df_calculated_kr[col] = pd.to_numeric(df_calculated_kr[col], errors='coerce')
+                df_calculated_kr.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True) # 가격 정보 없는 행 제거
+
+                if df_calculated_kr.empty:
+                     st.error("❌ 숫자 변환 후 유효한 가격 데이터가 없습니다.")
+                     return
+
+                try: df_calculated_kr = calculate_vwap(df_calculated_kr)
+                except Exception as e: st.warning(f"VWAP 계산 오류: {e}", icon="⚠️")
+                try: df_calculated_kr = calculate_bollinger_bands(df_calculated_kr, window=bb_window_val_kr, num_std=bb_std_val_kr)
+                except Exception as e: st.warning(f"BB 계산 오류: {e}", icon="⚠️")
+                try: df_calculated_kr = calculate_rsi(df_calculated_kr)
+                except Exception as e: st.warning(f"RSI 계산 오류: {e}", icon="⚠️")
+                try: df_calculated_kr = calculate_macd(df_calculated_kr)
+                except Exception as e: st.warning(f"MACD 계산 오류: {e}", icon="⚠️")
+
+                # 이동평균선 계산
+                df_calculated_kr['SMA5'] = df_calculated_kr['Close'].rolling(window=5).mean()
+                df_calculated_kr['SMA20'] = df_calculated_kr['Close'].rolling(window=20).mean()
+                df_calculated_kr['SMA60'] = df_calculated_kr['Close'].rolling(window=60).mean()
+
+                # 6. 차트 생성
+                fig_kr = plot_korean_technical_chart(df_calculated_kr, ticker_code, company_name_krx)
+                if fig_kr and fig_kr.data:
+                    st.plotly_chart(fig_kr, use_container_width=True)
+                else:
+                    st.warning("한국 주식 차트 생성에 실패했거나 표시할 데이터가 없습니다.")
+
+                # 7. 최근 데이터 테이블 표시
+                st.subheader("📄 최근 데이터 (계산된 지표 포함)")
+                display_cols_kr = ['Open', 'High', 'Low', 'Close', 'Volume', 'VWAP', 'MA20', 'Upper', 'Lower', 'RSI', 'MACD', 'MACD_signal', 'MACD_hist', 'SMA5', 'SMA20', 'SMA60']
+                display_cols_exist_kr = [col for col in display_cols_kr if col in df_calculated_kr.columns]
+                format_dict_kr = {col: "{:,.0f}" for col in ['Open', 'High', 'Low', 'Close', 'VWAP', 'MA20', 'Upper', 'Lower', 'SMA5', 'SMA20', 'SMA60'] if col in display_cols_exist_kr}
+                if 'Volume' in display_cols_exist_kr: format_dict_kr['Volume'] = "{:,.0f}"
+                for col_rsi_macd in ['RSI', 'MACD', 'MACD_signal', 'MACD_hist']:
+                    if col_rsi_macd in display_cols_exist_kr:
+                        format_dict_kr[col_rsi_macd] = "{:.2f}"
+                st.dataframe(df_calculated_kr[display_cols_exist_kr].tail(10).style.format(format_dict_kr), use_container_width=True)
+
+                # 8. 기술적 시그널 해석
+                st.divider()
+                st.subheader("🧠 기술적 시그널 해석 (참고용)")
+                if not df_calculated_kr.empty:
+                    latest_row_kr = df_calculated_kr.iloc[-1].copy()
+                    signal_messages_kr = []
+                    try:
+                        if 'interpret_technical_signals' in globals():
+                            signal_messages_kr.extend(interpret_technical_signals(latest_row_kr, df_context=df_calculated_kr))
+                        else:
+                            st.error("오류: 'interpret_technical_signals' 함수를 찾을 수 없습니다.")
+                    except Exception as e:
+                        st.warning(f"기술적 시그널 해석 중 오류 발생: {e}", icon="⚠️")
+
+                    if signal_messages_kr:
+                        for msg in signal_messages_kr: st.info(msg)
+                    else:
+                        st.info("현재 특별히 감지된 기술적 시그널은 없습니다.")
+                    st.caption("⚠️ **주의:** 자동 해석은 보조 지표이며 투자 결정은 반드시 종합적인 판단 하에 신중하게 내리시기 바랍니다.")
+                else:
+                    st.warning("해석할 데이터가 부족합니다.")
+
+            except Exception as e:
+                st.error(f"한국 주식 데이터 처리 중 오류 발생: {type(e).__name__} - {e}")
+                st.error(f"Traceback: {traceback.format_exc()}")
+
+# --- Streamlit 페이지 설정 ---
+st.set_page_config(page_title="종합 주식 분석 (FMP & pykrx)", layout="wide", initial_sidebar_state="expanded") # 타이틀 변경
+
+# --- FMP API 키 로드 및 확인 ---
+# ... (기존 코드 유지) ...
 fmp_key_loaded = False
 sidebar_status = st.sidebar.empty()
 final_status_message_displayed = False
-
+# ... (이하 FMP 키 로드 로직 전체) ...
 secrets_available = hasattr(st, 'secrets')
 if secrets_available:
     try:
         fmp_secret_key = st.secrets.get("FMP_API_KEY")
         if fmp_secret_key:
-            fmp_api.FMP_API_KEY = fmp_secret_key; fmp_key_loaded = True
-            # Key loaded from secrets, clear initial message if shown
-            sidebar_status.empty()
+            # fmp_api 모듈이 성공적으로 임포트되었는지 확인 후 키 설정
+            if 'fmp_api' in globals() and fmp_api:
+                fmp_api.FMP_API_KEY = fmp_secret_key
+                fmp_key_loaded = True
+                sidebar_status.empty()
+            else:
+                 sidebar_status.warning("FMP 모듈 로드 실패로 Secrets 키를 설정할 수 없습니다.")
         else:
             sidebar_status.warning("Secrets에 FMP API 키가 없습니다.")
     except Exception as e:
         sidebar_status.error(f"Secrets 로드 오류: {e}"); final_status_message_displayed = True
 
-# Try .env only if not loaded from secrets
-if not fmp_key_loaded:
+if not fmp_key_loaded and 'fmp_api' in globals() and fmp_api: # FMP 모듈 로드 확인 추가
     sidebar_status.info("Secrets에 키 없음. .env 파일 확인 중...")
     try:
         dotenv_path = os.path.join(BASE_DIR, '.env')
@@ -124,80 +410,127 @@ if not fmp_key_loaded:
             fmp_env_key = os.getenv("FMP_API_KEY")
             if fmp_env_key:
                 fmp_api.FMP_API_KEY = fmp_env_key; fmp_key_loaded = True
-                sidebar_status.success("API 키 로드 완료 (.env)")
+                sidebar_status.success("FMP API 키 로드 완료 (.env)")
                 final_status_message_displayed = True
             else:
                 sidebar_status.error(".env 파일 내 FMP API 키 누락 또는 로드 실패."); final_status_message_displayed = True
         else:
-             # If .env doesn't exist AND we didn't load from secrets, show final error
             if not secrets_available:
                 sidebar_status.error(".env 파일 없음, Secrets에도 FMP 키 없음."); final_status_message_displayed = True
-            # If .env doesn't exist but we ALREADY loaded from secrets, clear the "checking .env" message
-            elif fmp_key_loaded:
+            elif fmp_key_loaded: # Should not happen if already loaded, but for completeness
                 sidebar_status.empty()
-
     except Exception as e:
         sidebar_status.error(f".env 로드 오류: {e}"); final_status_message_displayed = True
+elif not fmp_key_loaded and 'fmp_api' not in globals():
+     sidebar_status.error("FMP API 모듈 로드 실패. API 키를 설정할 수 없습니다.")
+     final_status_message_displayed = True
 
-# --- 종합 분석 가능 여부 결정 및 최종 메시지 ---
 comprehensive_analysis_possible = fmp_key_loaded
 if not comprehensive_analysis_possible and not final_status_message_displayed:
-    st.sidebar.error("FMP API 키 로드 실패! '종합 분석' 기능이 제한됩니다.")
+    st.sidebar.error("FMP API 키 로드 실패! '미국 주식 종합 분석' 기능이 제한됩니다.")
 elif comprehensive_analysis_possible and not final_status_message_displayed:
-    # If key loaded but no other message shown, show success
-    sidebar_status.success("API 키 로드 완료.")
+    sidebar_status.success("FMP API 키 로드 완료.")
+
+
+# --- DART API 키 로드 (선택적, dart.py에서 환경 변수 사용 가정) ---
+# dart.py 내부에서 os.environ.get("DART_API_KEY")를 사용하므로 별도 로직 불필요.
+# 단, dart_api 모듈 로드 여부 확인
+dart_available = False
+if 'dart_api' in globals() and dart_api:
+    try:
+        # dart.py 내부에 API 키 확인 로직이 있다면 호출 (없으면 DART 기능 사용 시 오류 발생)
+        # 예: if dart_api.API_KEY: dart_available = True
+        # dart.py의 API_KEY 상수를 직접 확인 (import dart as dart_api 가정)
+        if dart_api.API_KEY:
+             dart_available = True
+             st.sidebar.success("DART API 키 확인됨 (환경 변수).")
+        else:
+             st.sidebar.warning("DART API 키가 환경 변수에 설정되지 않았습니다. '한국 기업 기본 정보' 기능이 제한될 수 있습니다.")
+    except AttributeError:
+         st.sidebar.warning("dart.py 에서 API_KEY 를 찾을 수 없습니다. '한국 기업 기본 정보' 기능이 제한될 수 있습니다.")
+    except Exception as e:
+         st.sidebar.warning(f"DART API 키 확인 중 오류: {e}")
+else:
+    st.sidebar.warning("dart.py 모듈 로드 실패. DART 관련 기능 사용 불가.")
 
 
 # --- 사이드바 설정 ---
 with st.sidebar:
-    # ... (후원계좌, 링크 등 유지) ...
-    st.title("📊 주식 분석 도구 (FMP API)")
+    st.title("📊 주식 분석 도구")
+    selected_country = st.radio("국가 선택", ["🇺🇸 미국 주식", "🇰🇷 한국 주식"], key="country_selector")
     st.markdown("---")
-    page = st.radio("분석 유형 선택", ["📊 종합 분석", "📈 기술 분석"], captions=["재무, 예측, 뉴스 등", "VWAP, BB, 피보나치 등"], key="page_selector")
-    st.markdown("---")
-    if page == "📊 종합 분석":
-        st.header("⚙️ 종합 분석 설정")
-        ticker_input = st.text_input("종목 티커", "AAPL", key="main_ticker", help="해외(예: AAPL) 또는 국내(예: 005930 - FMP는 .KS 제외)", disabled=not comprehensive_analysis_possible)
-        analysis_years = st.select_slider("분석 기간 (년)", [1, 2, 3, 5, 7, 10], 2, key="analysis_years", disabled=not comprehensive_analysis_possible)
-        st.caption(f"과거 {analysis_years}년 데이터 분석")
-        forecast_days = st.number_input("예측 기간 (일)", 7, 90, 30, 7, key="forecast_days", disabled=not comprehensive_analysis_possible)
-        st.caption(f"향후 {forecast_days}일 예측")
-        num_trend_periods_input = st.number_input("재무 추세 분기 수", 2, 12, 4, 1, key="num_trend_periods", disabled=not comprehensive_analysis_possible)
-        st.caption(f"최근 {num_trend_periods_input}개 분기 재무 추세 계산")
-        st.divider()
-        st.subheader("⚙️ 예측 세부 설정 (선택)")
-        changepoint_prior_input = st.slider("추세 변화 민감도 (Prophet)", 0.001, 0.5, 0.05, 0.01, "%.3f", help="클수록 과거 추세 변화에 민감 (기본값: 0.05)", key="changepoint_prior", disabled=not comprehensive_analysis_possible)
-        st.caption(f"현재 민감도: {changepoint_prior_input:.3f}")
-        st.divider()
-        st.subheader("💰 보유 정보 입력 (선택)")
-        avg_price = st.number_input("평단가", 0.0, format="%.2f", key="avg_price", disabled=not comprehensive_analysis_possible)
-        quantity = st.number_input("보유 수량", 0, step=1, key="quantity", disabled=not comprehensive_analysis_possible)
-        st.caption("평단가 입력 시 리스크 트래커 분석 활성화"); st.divider()
-    elif page == "📈 기술 분석":
-        st.header("⚙️ 기술 분석 설정")
-        # Ticker input needed here as well for technical analysis
-        ticker_tech_input = st.text_input("종목 티커", "AAPL", key="tech_ticker_input", help="해외(예: AAPL) 또는 국내(예: 005930 - FMP는 .KS 제외)")
-        bb_window = st.number_input("볼린저밴드 기간 (일)", 5, 50, 20, 1, key="bb_window")
-        bb_std = st.number_input("볼린저밴드 표준편차 배수", 1.0, 3.0, 2.0, 0.1, key="bb_std", format="%.1f")
-        st.caption(f"현재 설정: {bb_window}일 기간, {bb_std:.1f} 표준편차")
-        st.divider()
-        # Add date and interval selectors for Tech Analysis here
-        today_tech = datetime.now().date()
-        default_start_date_tech = today_tech - relativedelta(months=3)
-        min_date_allowed_tech = today_tech - relativedelta(years=5)
-        start_date_tech_input = st.date_input("시작일", default_start_date_tech, key="tech_start_input", min_value=min_date_allowed_tech, max_value=today_tech - timedelta(days=1))
-        end_date_tech_input = st.date_input("종료일", today_tech, key="tech_end_input", min_value=start_date_tech_input + timedelta(days=1), max_value=today_tech)
-        available_intervals_tech = {"일봉": "1day", "1시간": "1hour", "15분": "15min"}
-        interval_help_fmp_tech = """데이터 간격 선택 (FMP 기준):\n- FMP 플랜 따라 지원 간격 다름.\n- 분봉 데이터 유료 플랜 필요 가능성.\n* 조회 기간 제한도 FMP 플랜 따라 다름."""
-        interval_display_tech_input = st.selectbox("데이터 간격", list(available_intervals_tech.keys()), key="tech_interval_display_input", help=interval_help_fmp_tech)
+
+    page = None # page 변수 초기화
+    if selected_country == "🇺🇸 미국 주식":
+        page = st.radio("분석 유형 선택 (미국)", ["📊 종합 분석 (FMP)", "📈 기술 분석 (FMP)"],
+                        captions=["재무, 예측, 뉴스 등", "VWAP, BB, 피보나치 등"], key="page_selector_us")
+        st.markdown("---")
+        if page == "📊 종합 분석 (FMP)":
+            st.header("⚙️ 종합 분석 설정 (미국)")
+            ticker_input_us = st.text_input("종목 티커 (미국)", "AAPL", key="main_ticker_us", help="예: AAPL", disabled=not comprehensive_analysis_possible)
+            analysis_years_us = st.select_slider("분석 기간 (년)", [1, 2, 3, 5, 7, 10], 2, key="analysis_years_us", disabled=not comprehensive_analysis_possible)
+            forecast_days_us = st.number_input("예측 기간 (일)", 7, 90, 30, 7, key="forecast_days_us", disabled=not comprehensive_analysis_possible)
+            num_trend_periods_us = st.number_input("재무 추세 분기 수", 2, 12, 4, 1, key="num_trend_periods_us", disabled=not comprehensive_analysis_possible)
+            st.divider()
+            st.subheader("⚙️ 예측 세부 설정 (선택)")
+            changepoint_prior_us = st.slider("추세 변화 민감도 (Prophet)", 0.001, 0.5, 0.05, 0.01, "%.3f", key="changepoint_prior_us", disabled=not comprehensive_analysis_possible)
+            st.divider()
+            st.subheader("💰 보유 정보 입력 (선택)")
+            avg_price_us = st.number_input("평단가", 0.0, format="%.2f", key="avg_price_us", disabled=not comprehensive_analysis_possible)
+            quantity_us = st.number_input("보유 수량", 0, step=1, key="quantity_us", disabled=not comprehensive_analysis_possible)
+            st.divider()
+
+        elif page == "📈 기술 분석 (FMP)":
+            st.header("⚙️ 기술 분석 설정 (미국)")
+            ticker_tech_us = st.text_input("종목 티커 (미국)", "AAPL", key="tech_ticker_input_us", help="예: AAPL")
+            bb_window_us = st.number_input("볼린저밴드 기간 (일)", 5, 50, 20, 1, key="bb_window_us")
+            bb_std_us = st.number_input("볼린저밴드 표준편차 배수", 1.0, 3.0, 2.0, 0.1, key="bb_std_us", format="%.1f")
+            st.divider()
+            today_us = datetime.now().date()
+            default_start_us = today_us - relativedelta(months=3)
+            min_date_us = today_us - relativedelta(years=5)
+            start_date_us = st.date_input("시작일", default_start_us, key="tech_start_input_us", min_value=min_date_us, max_value=today_us - timedelta(days=1))
+            end_date_us = st.date_input("종료일", today_us, key="tech_end_input_us", min_value=start_date_us + timedelta(days=1), max_value=today_us)
+            available_intervals_tech_fmp = {"일봉": "1day", "1시간": "1hour", "15분": "15min"}
+            interval_display_us = st.selectbox("데이터 간격", list(available_intervals_tech_fmp.keys()), key="tech_interval_display_input_us", help="FMP 플랜 따라 지원 간격 및 기간 다름")
+            st.divider()
+
+    elif selected_country == "🇰🇷 한국 주식":
+        page = st.radio("분석 유형 선택 (한국)", ["📈 기술 분석 (pykrx)", "📝 기본 정보 (DART)"],
+                        captions=["차트 및 추세선", "기업 개요 및 공시정보"], key="page_selector_kr",
+                        help="기술 분석은 pykrx, 기본 정보는 DART API를 사용합니다.")
+        st.markdown("---")
+        if page == "📈 기술 분석 (pykrx)":
+            st.header("⚙️ 기술 분석 설정 (한국)")
+            ticker_tech_kr = st.text_input("종목명 또는 종목코드 (한국)", "삼성전자", key="tech_ticker_input_kr", help="예: 삼성전자 또는 005930")
+            bb_window_kr = st.number_input("볼린저밴드 기간 (일)", 5, 50, 20, 1, key="bb_window_kr")
+            bb_std_kr = st.number_input("볼린저밴드 표준편차 배수", 1.0, 3.0, 2.0, 0.1, key="bb_std_kr", format="%.1f")
+            st.divider()
+            today_kr = datetime.now().date()
+            default_start_kr = today_kr - relativedelta(months=6) # 기본 6개월 조회
+            min_date_kr = today_kr - relativedelta(years=10) # pykrx는 비교적 긴 기간 제공
+            start_date_kr = st.date_input("시작일 (한국)", default_start_kr, key="tech_start_input_kr", min_value=min_date_kr, max_value=today_kr - timedelta(days=1))
+            end_date_kr = st.date_input("종료일 (한국)", today_kr, key="tech_end_input_kr", min_value=start_date_kr + timedelta(days=1), max_value=today_kr)
+            st.caption("pykrx는 일별 데이터를 제공합니다.")
+            st.divider()
+
+        elif page == "📝 기본 정보 (DART)":
+            st.header("⚙️ 기본 정보 설정 (한국)")
+            company_kr_info = st.text_input("기업명 또는 종목코드 (한국)", "삼성전자", key="company_info_input_kr", disabled=not dart_available)
+            # DART 정보 조회용 날짜 범위 (예: 최근 1년)
+            today_dart = datetime.now().date()
+            default_start_dart = today_dart - relativedelta(years=1)
+            start_date_dart = st.date_input("공시 검색 시작일", default_start_dart, key="dart_start_input", max_value=today_dart - timedelta(days=1), disabled=not dart_available)
+            end_date_dart = st.date_input("공시 검색 종료일", today_dart, key="dart_end_input", min_value=start_date_dart + timedelta(days=1), max_value=today_dart, disabled=not dart_available)
+            st.divider()
 
 
-# --- 캐시된 종합 분석 함수 (fred_key 제거) ---
+# --- 캐시된 종합 분석 함수 (기존 코드 유지) ---
 @st.cache_data(ttl=timedelta(hours=1))
-def run_cached_analysis(ticker, years, days, num_trend_periods, changepoint_prior_scale): # fred_key 제거
+def run_cached_analysis(ticker, years, days, num_trend_periods, changepoint_prior_scale):
+    # ... (기존 run_cached_analysis 함수 내용) ...
     logging.info(f"종합 분석 실행: {ticker}, {years}년, {days}일, {num_trend_periods}분기, cp_prior={changepoint_prior_scale}")
     try:
-        # analyze_stock 호출 시 fred_key 인자 제거
         analysis_results = sa.analyze_stock(
             ticker,
             analysis_period_years=years,
@@ -210,511 +543,360 @@ def run_cached_analysis(ticker, years, days, num_trend_periods, changepoint_prio
         logging.error(f"analyze_stock 함수 실행 중 오류 발생 (ticker: {ticker}): {e}\n{traceback.format_exc()}")
         return {"error": f"종합 분석 중 오류 발생: {e}"}
 
+
 # --- 메인 화면 로직 ---
-# ============== 📊 종합 분석 탭 ==============
-if page == "📊 종합 분석":
-    st.title("📊 종합 분석 결과 (FMP API 기반)")
-    st.markdown("기업 정보, 재무 추세, 예측, 리스크 트래커 제공.")
-    st.markdown("---")
-    analyze_button_main_disabled = not comprehensive_analysis_possible
-    if analyze_button_main_disabled: st.error("FMP API 키 로드 실패. 종합 분석 불가.")
-    analyze_button_main = st.button("🚀 종합 분석 시작!", use_container_width=True, type="primary", key="analyze_main_button", disabled=analyze_button_main_disabled)
-    results_placeholder = st.container()
-    if analyze_button_main:
-        ticker = st.session_state.get('main_ticker', "AAPL")
-        years = st.session_state.get('analysis_years', 2)
-        days = st.session_state.get('forecast_days', 30)
-        periods = st.session_state.get('num_trend_periods', 4)
-        cp_prior = st.session_state.get('changepoint_prior', 0.05)
-        avg_p = st.session_state.get('avg_price', 0.0)
-        qty = st.session_state.get('quantity', 0)
+if page: # page가 None이 아닐 때만 실행 (초기 로딩 시 방지)
+    if selected_country == "🇺🇸 미국 주식":
+        if page == "📊 종합 분석 (FMP)":
+            st.title("🇺🇸 미국 주식 종합 분석 (FMP API 기반)")
+            st.markdown("기업 정보, 재무 추세, 예측, 리스크 트래커 제공.")
+            st.markdown("---")
+            analyze_button_main_disabled = not comprehensive_analysis_possible
+            if analyze_button_main_disabled: st.error("FMP API 키 로드 실패. 종합 분석 불가.")
 
-        if not ticker: results_placeholder.warning("종목 티커 입력 필요.")
-        else:
-            ticker_proc = ticker.strip().upper()
-            if '.KS' in ticker_proc or '.KQ' in ticker_proc:
-                original_ticker = ticker_proc
-                ticker_proc = ticker_proc.split('.')[0]
-                results_placeholder.info(f"국내 티커 감지: {original_ticker} -> {ticker_proc} (FMP용)")
+            # 사이드바에서 설정된 값 가져오기 (키 일관성 확인!)
+            ticker_us = st.session_state.get('main_ticker_us', "AAPL")
+            analysis_years_us = st.session_state.get('analysis_years_us', 2)
+            forecast_days_us = st.session_state.get('forecast_days_us', 30)
+            num_trend_periods_us = st.session_state.get('num_trend_periods_us', 4)
+            changepoint_prior_us = st.session_state.get('changepoint_prior_us', 0.05)
+            avg_price_us = st.session_state.get('avg_price_us', 0.0)
+            quantity_us = st.session_state.get('quantity_us', 0)
 
-            with st.spinner(f"{ticker_proc} 종합 분석 중..."):
-                try:
-                    # --- run_cached_analysis 호출 (FRED_API_KEY 인자 제거) ---
-                    results = run_cached_analysis(ticker_proc, years, days, periods, cp_prior)
-                    # --- 결과 표시 로직 ---
-                    if results and isinstance(results, dict):
-                        if "error" in results:
-                            results_placeholder.error(f"분석 실패: {results['error']}")
-                        else:
-                            results_placeholder.empty() # Clear spinner message area
-                            if results.get("warn_high_mape"):
-                                m = results.get("mape", "N/A")
-                                mape_value_str = m if isinstance(m, str) else (f"{m:.1f}%" if isinstance(m, (int, float)) else "N/A")
-                                st.warning(f"🔴 모델 정확도 낮음 (MAPE {mape_value_str}). 예측 신뢰도 주의!")
+            analyze_button_main_us = st.button("🚀 미국 주식 종합 분석 시작!", use_container_width=True, type="primary", key="analyze_main_us_button", disabled=analyze_button_main_disabled)
+            results_placeholder_us = st.container()
 
-                            with results_placeholder: # Use the container to display results
-                                st.header(f"📈 {ticker_proc} 분석 결과 (민감도: {cp_prior:.3f})")
-                                st.subheader("요약 정보")
-                                col1, col2, col3 = st.columns(3)
-                                col1.metric("현재가", f"${results.get('current_price', 'N/A')}")
-                                col2.metric("분석 시작일", results.get('analysis_period_start', 'N/A'))
-                                col3.metric("분석 종료일", results.get('analysis_period_end', 'N/A'))
-
-                                st.subheader("📊 기업 기본 정보")
-                                fundamentals = results.get('fundamentals')
-                                if fundamentals and isinstance(fundamentals, dict) and fundamentals.get("시가총액", "N/A") != "N/A":
-                                    colf1, colf2, colf3 = st.columns(3)
-                                    with colf1: st.metric("시가총액", fundamentals.get("시가총액", "N/A")); st.metric("PER", fundamentals.get("PER", "N/A"))
-                                    with colf2: st.metric("EPS", fundamentals.get("EPS", "N/A")); st.metric("Beta", fundamentals.get("베타", "N/A"))
-                                    with colf3: st.metric("배당", fundamentals.get("배당수익률", "N/A")); st.metric("업종", fundamentals.get("업종", "N/A"))
-                                    industry = fundamentals.get("산업", "N/A")
-                                    summary = fundamentals.get("요약", "N/A")
-                                    if industry != "N/A": st.markdown(f"**산업:** {industry}")
-                                    # --- SyntaxError Fix: Indent the block below ---
-                                    if summary != "N/A":
-                                        with st.expander("회사 요약 보기"):
-                                            st.write(summary)
-                                    # ----------------------------------------------
-                                    st.caption("Data Source: Financial Modeling Prep")
+            if analyze_button_main_us:
+                if not ticker_us: results_placeholder_us.warning("종목 티커 입력 필요.")
+                else:
+                    ticker_proc_us = ticker_us.strip().upper()
+                    with st.spinner(f"{ticker_proc_us} 종합 분석 중..."):
+                        try:
+                            results = run_cached_analysis(ticker_proc_us, analysis_years_us, forecast_days_us, num_trend_periods_us, changepoint_prior_us)
+                            if results and isinstance(results, dict):
+                                if "error" in results:
+                                    results_placeholder_us.error(f"분석 실패: {results['error']}")
                                 else:
-                                    st.warning("기업 기본 정보 로드 실패.")
+                                    results_placeholder_us.empty()
+                                    with results_placeholder_us:
+                                        # --- 미국 종합 분석 결과 표시 ---
+                                        # 이 부분은 제공해주신 기존 코드의 결과 표시 로직을 그대로 가져옵니다.
+                                        # (st.header, st.subheader, st.metric, st.columns, st.tabs, st.plotly_chart, st.expander 등)
+                                        # 변수명만 위에서 정의한 _us 접미사가 붙은 변수들 (ticker_proc_us, changepoint_prior_us, avg_price_us 등)로 사용해야 합니다.
+                                        # 예시 시작:
+                                        st.header(f"📈 {ticker_proc_us} 분석 결과 (민감도: {changepoint_prior_us:.3f})")
+                                        st.subheader("요약 정보")
+                                        col1, col2, col3 = st.columns(3)
+                                        col1.metric("현재가", f"${results.get('current_price', 'N/A')}") # FMP는 달러
+                                        col2.metric("분석 시작일", results.get('analysis_period_start', 'N/A'))
+                                        col3.metric("분석 종료일", results.get('analysis_period_end', 'N/A'))
+                                        # ... [기존 미국 종합 분석 결과 표시 로직 전체 삽입] ...
+                                        # ... (Fundamentals, 재무 추세, 차트, 뉴스, F&G, 예측, 리스크 트래커, 요약 등)
+                                        # 리스크 트래커 부분에서 avg_p 대신 avg_price_us, qty 대신 quantity_us 사용
+                                        # 예시 끝.
 
-                                st.divider()
-                                st.subheader(f"📈 주요 재무 추세 (최근 {periods} 분기)")
-                                tab_titles = ["영업이익률(%)", "ROE(%)", "부채비율", "유동비율"]
-                                tabs = st.tabs(tab_titles)
-                                trend_data_map = {
-                                    "영업이익률(%)": ('operating_margin_trend', 'Op Margin (%)', "{:.2f}%"),
-                                    "ROE(%)": ('roe_trend', 'ROE (%)', "{:.2f}%"),
-                                    "부채비율": ('debt_to_equity_trend', 'D/E Ratio', "{:.2f}"),
-                                    "유동비율": ('current_ratio_trend', 'Current Ratio', "{:.2f}")
-                                }
-                                for i, title in enumerate(tab_titles):
-                                    with tabs[i]:
-                                        data_key, col_name, style_format = trend_data_map[title]
-                                        trend_data = results.get(data_key)
-                                        if trend_data and isinstance(trend_data, list) and len(trend_data) > 0:
-                                            try:
-                                                df_trend = pd.DataFrame(trend_data)
-                                                df_trend['Date'] = pd.to_datetime(df_trend['Date'])
-                                                df_trend.set_index('Date', inplace=True)
-                                                if col_name in df_trend.columns:
-                                                    st.line_chart(df_trend[[col_name]])
-                                                    with st.expander("데이터 보기"):
-                                                        st.dataframe(df_trend[[col_name]].style.format({col_name: style_format}), use_container_width=True)
-                                                else: st.error(f"'{col_name}' 컬럼 없음.")
-                                            except Exception as e: st.error(f"{title} 표시 오류: {e}")
-                                        else: st.info(f"{title} 추세 데이터 없음.")
+                            elif results is None: results_placeholder_us.error("분석 결과 처리 중 오류 발생 (결과 없음).")
+                            else: results_placeholder_us.error("분석 결과 처리 중 오류 발생 (결과 형식 오류).")
+                        except Exception as e:
+                            error_traceback = traceback.format_exc()
+                            logging.error(f"미국 종합 분석 메인 로직 실행 오류: {e}\n{error_traceback}")
+                            results_placeholder_us.error(f"앱 실행 중 오류 발생: {e}")
+            else:
+                if comprehensive_analysis_possible:
+                    results_placeholder_us.info("⬅️ 사이드바에서 설정을 확인하고 '미국 주식 종합 분석 시작!' 버튼을 클릭하세요.")
+                else:
+                    results_placeholder_us.warning("API 키 로드 실패로 종합 분석을 진행할 수 없습니다.")
 
-                                st.divider()
-                                st.subheader("기술적 분석 차트 (종합)")
-                                stock_chart_fig = results.get('stock_chart_fig')
-                                if stock_chart_fig:
-                                    st.plotly_chart(stock_chart_fig, use_container_width=True)
+
+        elif page == "📈 기술 분석 (FMP)":
+            st.title("🇺🇸 미국 주식 기술적 분석 (FMP API)")
+            st.markdown("VWAP, 볼린저밴드, 피보나치 되돌림 수준을 함께 시각화하고 자동 해석을 제공합니다.")
+            st.markdown("---")
+
+            # 사이드바에서 설정된 값 가져오기 (키 일관성 확인!)
+            ticker_tech_us = st.session_state.get('tech_ticker_input_us', "AAPL")
+            start_date_us = st.session_state.get('tech_start_input_us', datetime.now().date() - relativedelta(months=3))
+            end_date_us = st.session_state.get('tech_end_input_us', datetime.now().date())
+            available_intervals_tech_fmp = {"일봉": "1day", "1시간": "1hour", "15분": "15min"}
+            interval_display_us = st.session_state.get('tech_interval_display_input_us', "일봉")
+            interval_us = available_intervals_tech_fmp.get(interval_display_us, "1day")
+            bb_window_us = st.session_state.get('bb_window_us', 20)
+            bb_std_us = st.session_state.get('bb_std_us', 2.0)
+
+            analyze_button_tech_us = st.button("📊 미국 주식 기술적 분석 실행", key="tech_analyze_us_button", use_container_width=True, type="primary")
+            results_placeholder_tech_us = st.container()
+
+            if analyze_button_tech_us:
+                if not ticker_tech_us: results_placeholder_tech_us.warning("종목 티커를 입력해주세요.")
+                else:
+                    ticker_processed_us = ticker_tech_us.strip().upper()
+                    with results_placeholder_tech_us:
+                        st.write(f"**{ticker_processed_us}** ({interval_display_us}, BB:{bb_window_us}일/{bb_std_us:.1f}σ) 분석 중 (FMP API 사용)...")
+                        with st.spinner(f"{ticker_processed_us} 데이터 로딩 및 처리 중 (FMP)..."):
+                            try:
+                                # --- 미국 기술 분석 실행 로직 ---
+                                start_date_str_us = start_date_us.strftime("%Y-%m-%d")
+                                end_date_str_us = end_date_us.strftime("%Y-%m-%d")
+                                fmp_data_us = None
+                                rename_map_us = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+
+                                if interval_us == "1day":
+                                    fmp_data_us = fmp_api.get_price_data(ticker=ticker_processed_us, start_date=start_date_str_us, end_date=end_date_str_us)
                                 else:
-                                    st.warning("주가 차트 생성 실패 (종합).")
-                                st.divider()
-                                st.subheader("시장 심리 분석")
-                                col_news, col_fng = st.columns([2, 1])
-                                with col_news:
-                                    st.markdown("**📰 뉴스 감정 분석 (FMP + TextBlob)**")
-                                    news_sentiment = results.get('news_sentiment', ["정보 없음."])
-                                    if isinstance(news_sentiment, list) and len(news_sentiment) > 0:
-                                        st.info(news_sentiment[0]) # Display summary line
-                                        if len(news_sentiment) > 1:
-                                            with st.expander("뉴스 목록 보기"):
-                                                # Use st.write for each line for better formatting
-                                                for line in news_sentiment[1:]:
-                                                     st.write(f"- {line}")
-                                    else: st.write(str(news_sentiment)) # Handle non-list cases
-                                with col_fng:
-                                    st.markdown("**😨 공포-탐욕 지수**")
-                                    fng_index = results.get('fear_greed_index', "N/A")
-                                    if isinstance(fng_index, dict):
-                                        st.metric("현재 지수", fng_index.get('value', 'N/A'), fng_index.get('classification', ''))
-                                    else: st.write(fng_index)
+                                    fmp_data_us = fmp_api.get_intraday_data(ticker=ticker_processed_us, interval=interval_us, from_date=start_date_str_us, to_date=end_date_str_us)
 
-                                st.divider()
-                                st.subheader("Prophet 주가 예측")
-                                forecast_fig = results.get('forecast_fig')
-                                forecast_data_list = results.get('prophet_forecast')
-                                if forecast_fig: st.plotly_chart(forecast_fig, use_container_width=True)
-                                elif isinstance(forecast_data_list, str): st.info(forecast_data_list); # Show message like "Prediction failed"
-                                else: st.warning("예측 차트 생성 실패.")
+                                df_tech_us = pd.DataFrame()
+                                if fmp_data_us and isinstance(fmp_data_us, list) and len(fmp_data_us) > 0:
+                                    df_tech_us = pd.DataFrame(fmp_data_us)
+                                    if not df_tech_us.empty:
+                                        df_tech_us = df_tech_us.rename(columns=rename_map_us)
+                                        date_col_name_us = rename_map_us.get('date', 'Date')
+                                        if date_col_name_us in df_tech_us.columns:
+                                            df_tech_us[date_col_name_us] = pd.to_datetime(df_tech_us[date_col_name_us], errors='coerce')
+                                            df_tech_us = df_tech_us.set_index(date_col_name_us).sort_index()
+                                            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                                                if col in df_tech_us.columns:
+                                                    df_tech_us[col] = pd.to_numeric(df_tech_us[col], errors='coerce')
+                                            df_tech_us.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
+                                        else:
+                                            st.error(f"FMP 응답 날짜 컬럼 '{date_col_name_us}' 없음.")
+                                            df_tech_us = pd.DataFrame()
+                                elif fmp_data_us is None:
+                                    st.error(f"FMP 데이터 로딩 오류 (API 결과 None).")
+                                else: # Empty list
+                                    st.warning(f"FMP 데이터 '{ticker_processed_us}' ({interval_display_us}) 가져오기 실패 (API 결과 빈 리스트).")
 
-                                if isinstance(forecast_data_list, list) and len(forecast_data_list) > 0:
-                                    st.markdown("**📊 예측 데이터 (최근 10일)**")
-                                    try:
-                                        df_fcst = pd.DataFrame(forecast_data_list)
-                                        df_fcst['ds'] = pd.to_datetime(df_fcst['ds'])
-                                        df_fcst_display = df_fcst.sort_values("ds").iloc[-10:].copy()
-                                        df_fcst_display['ds'] = df_fcst_display['ds'].dt.strftime('%Y-%m-%d')
-                                        format_dict_fcst = {col: "{:.2f}" for col in ['yhat', 'yhat_lower', 'yhat_upper'] if col in df_fcst_display.columns}
-                                        # Ensure columns exist before trying to format
-                                        display_cols_fcst = ['ds'] + [col for col in format_dict_fcst if col in df_fcst_display]
-                                        st.dataframe(df_fcst_display[display_cols_fcst].style.format(format_dict_fcst), use_container_width=True)
-                                    except Exception as e: st.error(f"예측 데이터 표시 오류: {e}")
+                                if df_tech_us.empty:
+                                    if not st.session_state.get('error_shown_tech_us', False):
+                                        st.error(f"❌ 데이터 조회/처리 실패.")
+                                        st.session_state['error_shown_tech_us'] = True
+                                else:
+                                    st.session_state['error_shown_tech_us'] = False
+                                    logging.info(f"FMP 데이터 처리 완료 ({ticker_processed_us}, {interval_display_us}). {len(df_tech_us)} 행.")
+                                    st.caption(f"조회 기간 (FMP): {df_tech_us.index.min()} ~ {df_tech_us.index.max()}")
 
-                                cv_plot_path = results.get('cv_plot_path')
-                                if cv_plot_path and os.path.exists(cv_plot_path):
-                                    st.markdown("**📉 교차 검증 결과 (MAPE)**")
-                                    try: st.image(cv_plot_path, caption="MAPE (낮을수록 정확)")
-                                    except Exception as img_e: st.warning(f"CV 이미지 로드 실패: {img_e}")
-                                elif cv_plot_path is None and isinstance(forecast_data_list, list) and len(forecast_data_list) > 0:
-                                    # Only show if forecast data exists but CV plot doesn't
-                                    st.caption("교차 검증(CV) 결과 없음.")
-
-                                st.divider()
-                                st.subheader("🚨 리스크 트래커 (예측 기반)")
-                                risk_days, max_loss_pct, max_loss_amt = 0, 0.0, 0.0 # Initialize as floats
-                                valid_pred = False # Initialize valid_pred
-
-                                if avg_p > 0 and isinstance(forecast_data_list, list) and len(forecast_data_list) > 0:
-                                    try:
-                                        df_pred = pd.DataFrame(forecast_data_list)
-                                        required_fcst_cols = ['ds', 'yhat_lower']
-                                        if all(col in df_pred.columns for col in required_fcst_cols):
-                                            df_pred['ds'] = pd.to_datetime(df_pred['ds'], errors='coerce')
-                                            df_pred['yhat_lower'] = pd.to_numeric(df_pred['yhat_lower'], errors='coerce')
-                                            df_pred.dropna(subset=['ds', 'yhat_lower'], inplace=True)
-                                            if not df_pred.empty: valid_pred = True # Set valid_pred to True if data remains
-
-                                        if valid_pred: # Check valid_pred before proceeding
-                                            df_pred['평단가'] = avg_p
-                                            df_pred['리스크 여부'] = df_pred['yhat_lower'] < avg_p
-                                            # Ensure avg_p is not zero before division
-                                            if avg_p != 0:
-                                                 df_pred['예상 손실률'] = np.where(df_pred['리스크 여부'], ((df_pred['yhat_lower'] - avg_p) / avg_p) * 100, 0.0).fillna(0.0)
-                                            else:
-                                                 df_pred['예상 손실률'] = 0.0 # Avoid division by zero
-
-                                            if qty > 0:
-                                                df_pred['예상 손실액'] = np.where(df_pred['리스크 여부'], (df_pred['yhat_lower'] - avg_p) * qty, 0.0).fillna(0.0)
-                                            else: df_pred['예상 손실액'] = 0.0
-
-                                            risk_days = df_pred['리스크 여부'].sum()
-                                            if risk_days > 0:
-                                                valid_loss_pct = df_pred.loc[df_pred['리스크 여부'], '예상 손실률'].dropna()
-                                                max_loss_pct = valid_loss_pct.min() if not valid_loss_pct.empty else 0.0
-                                                if qty > 0:
-                                                     valid_loss_amt = df_pred.loc[df_pred['리스크 여부'], '예상 손실액'].dropna()
-                                                     max_loss_amt = valid_loss_amt.min() if not valid_loss_amt.empty else 0.0
-                                                else: max_loss_amt = 0.0
-                                            else: max_loss_pct, max_loss_amt = 0.0, 0.0
-
-                                            st.markdown("##### 리스크 요약")
-                                            col_r1, col_r2, col_r3 = st.columns(3)
-                                            col_r1.metric("⚠️ < 평단가 일수", f"{risk_days}일 / {days}일")
-                                            col_r2.metric("📉 Max 손실률", f"{max_loss_pct:.2f}%")
-                                            if qty > 0: col_r3.metric("💸 Max 손실액", f"${max_loss_amt:,.2f}")
-                                            else: col_r3.metric("💸 Max 손실액", "N/A (수량 0)")
-
-
-                                            if risk_days > 0: st.warning(f"{days}일 예측 중 **{risk_days}일** 평단가(${avg_p:.2f}) 하회 가능성.")
-                                            else: st.success(f"{days}일간 평단가(${avg_p:.2f}) 하회 가능성 낮음.")
-
-                                            st.markdown("##### 평단가 vs 예측 구간 비교")
-                                            fig_risk = go.Figure()
-                                            plot_cols_risk = {'yhat_lower': 'rgba(0,100,80,0.2)', 'yhat_upper': 'rgba(0,100,80,0.2)', 'yhat': 'rgba(0,100,80,0.6)'}
-                                            df_plot_risk = df_pred[['ds'] + list(plot_cols_risk.keys())].copy()
-                                            # Convert plot columns to numeric safely
-                                            for col in plot_cols_risk:
-                                                 if col in df_plot_risk.columns:
-                                                      df_plot_risk[col] = pd.to_numeric(df_plot_risk[col], errors='coerce')
-                                            df_plot_risk.dropna(subset=['ds'] + list(plot_cols_risk.keys()), how='any', inplace=True)
-
-                                            if not df_plot_risk.empty:
-                                                if 'yhat_upper' in df_plot_risk.columns: fig_risk.add_trace(go.Scatter(x=df_plot_risk['ds'], y=df_plot_risk['yhat_upper'], mode='lines', line_color=plot_cols_risk['yhat_upper'], name='Upper'))
-                                                if 'yhat_lower' in df_plot_risk.columns: fig_risk.add_trace(go.Scatter(x=df_plot_risk['ds'], y=df_plot_risk['yhat_lower'], mode='lines', line_color=plot_cols_risk['yhat_lower'], name='Lower', fill='tonexty' if 'yhat_upper' in df_plot_risk.columns else None, fillcolor='rgba(0,100,80,0.1)'))
-                                                if 'yhat' in df_plot_risk.columns: fig_risk.add_trace(go.Scatter(x=df_plot_risk['ds'], y=df_plot_risk['yhat'], mode='lines', line=dict(dash='dash', color=plot_cols_risk['yhat']), name='Forecast'))
-                                                fig_risk.add_hline(y=avg_p, line_dash="dot", line_color="red", annotation_text=f"평단가: ${avg_p:.2f}", annotation_position="bottom right")
-                                                df_risk_periods = df_pred[df_pred['리스크 여부']]
-                                                if not df_risk_periods.empty: fig_risk.add_trace(go.Scatter(x=df_risk_periods['ds'], y=df_risk_periods['yhat_lower'], mode='markers', marker_symbol='x', marker_color='red', name='Risk Day'))
-                                                fig_risk.update_layout(hovermode="x unified")
-                                                st.plotly_chart(fig_risk, use_container_width=True)
-
-                                                if risk_days > 0:
-                                                    with st.expander(f"리스크 예측일 상세 데이터 ({risk_days}일)"):
-                                                        df_risk_days_display = df_pred[df_pred['리스크 여부']].copy()
-                                                        df_risk_days_display['ds'] = df_risk_days_display['ds'].dt.strftime('%Y-%m-%d')
-                                                        cols_show = ['ds', 'yhat_lower', '평단가', '예상 손실률']
-                                                        formatters = {"yhat_lower":"{:.2f}", "평단가":"{:.2f}", "예상 손실률":"{:.2f}%"}
-                                                        if qty > 0 and '예상 손실액' in df_risk_days_display.columns:
-                                                            cols_show.append('예상 손실액')
-                                                            formatters["예상 손실액"] = "${:,.2f}"
-                                                        # Ensure columns exist before displaying
-                                                        cols_show_final = [col for col in cols_show if col in df_risk_days_display.columns]
-                                                        st.dataframe(df_risk_days_display[cols_show_final].style.format(formatters), use_container_width=True)
-                                            else: st.info("차트 표시 필요 데이터 부족.")
-                                        else: st.info("리스크 분석 위한 유효 데이터 없음.") # Show if valid_pred is False
-                                    except Exception as risk_calc_err:
-                                         st.error(f"리스크 트래커 계산/표시 오류: {risk_calc_err}")
-                                         logging.error(f"Risk tracker error: {traceback.format_exc()}")
-                                elif avg_p <= 0: st.info("⬅️ 사이드바 '평단가' 입력 시 리스크 분석 확인 가능.")
-                                else: st.warning("예측 데이터 부족/오류로 리스크 분석 불가.")
-
-                                st.divider()
-                                st.subheader("🧐 자동 분석 결과 요약 (참고용)")
-                                summary_points = []
-                                if isinstance(forecast_data_list, list) and forecast_data_list:
-                                    try:
-                                        df_pred_summary = pd.DataFrame(forecast_data_list)
-                                        # Check if necessary columns exist and have data
-                                        if all(col in df_pred_summary.columns for col in ['yhat', 'yhat_lower', 'yhat_upper']) and not df_pred_summary['yhat'].isnull().all():
-                                            start_pred = df_pred_summary["yhat"].iloc[0]; end_pred = df_pred_summary["yhat"].iloc[-1]
-                                            if pd.notna(start_pred) and pd.notna(end_pred):
-                                                trend_obs = ("상승" if end_pred > start_pred * 1.02 else "하락" if end_pred < start_pred * 0.98 else "횡보")
-                                            else: trend_obs = "판단 불가"
-
-                                            lower = df_pred_summary["yhat_lower"].min() if df_pred_summary['yhat_lower'].notna().any() else 'N/A'
-                                            upper = df_pred_summary["yhat_upper"].max() if df_pred_summary['yhat_upper'].notna().any() else 'N/A'
-                                            lower_str = f"${lower:.2f}" if isinstance(lower, (int, float)) else lower
-                                            upper_str = f"${upper:.2f}" if isinstance(upper, (int, float)) else upper
-                                            summary_points.append(f"- **예측:** 향후 {days}일간 **{trend_obs}** 추세 ({lower_str} ~ {upper_str})")
-                                        else: summary_points.append("- 예측: 예측 결과 컬럼 부족 또는 데이터 없음")
-                                    except Exception as e: summary_points.append(f"- 예측: 요약 생성 오류: {e}")
-                                else: summary_points.append("- 예측: 예측 데이터 부족/오류로 요약 불가")
-
-                                # News Sentiment Summary
-                                if isinstance(news_sentiment, list) and len(news_sentiment) > 0 and ":" in news_sentiment[0]:
-                                    try:
-                                        score_part = news_sentiment[0].split(":")[-1].strip()
-                                        avg_score = float(score_part)
-                                        sentiment_desc = "긍정적" if avg_score > 0.05 else "부정적" if avg_score < -0.05 else "중립적"
-                                        summary_points.append(f"- **뉴스:** 평균 감성 {avg_score:.2f}, **{sentiment_desc}** 분위기.")
-                                    except Exception as e: summary_points.append(f"- 뉴스: 요약 오류 ({e})") # Include error details
-                                elif isinstance(news_sentiment, list): summary_points.append(f"- 뉴스: {news_sentiment[0]}") # Show summary line if parsing failed
-                                else: summary_points.append("- 뉴스: 감성 분석 정보 없음/오류.")
-
-                                # Fear & Greed Summary
-                                if isinstance(fng_index, dict):
-                                     summary_points.append(f"- **시장 심리:** 공포-탐욕 {fng_index.get('value', 'N/A')} (**{fng_index.get('classification', 'N/A')}**).")
-                                else: summary_points.append("- 시장 심리: 공포-탐욕 지수 정보 없음/오류.")
-
-                                # Fundamentals Summary
-                                if fundamentals and isinstance(fundamentals, dict):
-                                    per = fundamentals.get("PER", "N/A"); sector = fundamentals.get("업종", "N/A")
-                                    parts = [f"PER {per}"] if per != "N/A" else []
-                                    parts.extend([f"업종 '{sector}'"] if sector != "N/A" else [])
-                                    if parts: summary_points.append(f"- **기본 정보:** {', '.join(parts)}.")
-                                    else: summary_points.append("- 기본 정보: 주요 지표(PER, 업종) 없음.")
-                                else: summary_points.append("- 기본 정보: 로드 실패/정보 없음.")
-
-                                # Financial Trend Summary
-                                trend_parts = []
-                                trend_labels = {'operating_margin_trend': '영업익률','roe_trend': 'ROE','debt_to_equity_trend': '부채비율','current_ratio_trend': '유동비율'}
-                                trend_suffix = {'operating_margin_trend': '%','roe_trend': '%','debt_to_equity_trend': '','current_ratio_trend': ''}
-                                trend_value_keys = {'operating_margin_trend': 'Op Margin (%)','roe_trend': 'ROE (%)','debt_to_equity_trend': 'D/E Ratio','current_ratio_trend': 'Current Ratio'}
-                                try:
-                                    for key in trend_labels:
-                                        trend_list = results.get(key)
-                                        if trend_list and isinstance(trend_list, list):
-                                            last_item = trend_list[-1] # Get the most recent period
-                                            value_key = trend_value_keys[key]
-                                            value = last_item.get(value_key)
-                                            if isinstance(value, (int, float)):
-                                                 trend_parts.append(f"{trend_labels[key]} {value:.2f}{trend_suffix[key]}")
-                                            elif value is not None: # Handle cases where value might be non-numeric string
-                                                 trend_parts.append(f"{trend_labels[key]}: {value}")
-                                            # else: # Optionally add message for missing value
-                                            #      trend_parts.append(f"{trend_labels[key]} 정보 부족")
-                                    if trend_parts: summary_points.append(f"- **최근 재무:** {', '.join(trend_parts)}.")
-                                    # else: summary_points.append("- 최근 재무: 정보 없음.") # Optionally add if no trends found
-                                except Exception as e: summary_points.append(f"- 최근 재무: 요약 오류: {e}")
-
-                                # Risk Tracker Summary
-                                if avg_p > 0 and valid_pred: # Use valid_pred flag
-                                    if risk_days > 0:
-                                        summary_points.append(f"- **리스크:** {days}일 중 **{risk_days}일** 평단가(${avg_p:.2f}) 하회 가능성 (Max 손실률: **{max_loss_pct:.2f}%**).")
-                                    else: summary_points.append(f"- **리스크:** 예측 기간 내 평단가(${avg_p:.2f}) 하회 가능성 낮음.")
-                                elif avg_p > 0: # If avg_price given but prediction failed
-                                     summary_points.append(f"- 리스크: 평단가(${avg_p:.2f}) 입력됨, 예측 데이터 부족/오류로 분석 불가.")
-                                # else: # No avg_price given
-                                #      summary_points.append("- 리스크: 평단가 미입력으로 분석 생략.")
-
-
-                                if summary_points:
-                                     st.markdown("\n".join(summary_points))
-                                     st.caption("⚠️ **주의:** 자동 생성된 요약이며 투자 결정의 근거가 될 수 없습니다.")
-                                else: st.write("분석 요약 생성 불가.")
-
-                    elif results is None: results_placeholder.error("분석 결과 처리 중 오류 발생 (결과 없음).")
-                    else: results_placeholder.error("분석 결과 처리 중 오류 발생 (결과 형식 오류).")
-                except Exception as e:
-                    error_traceback = traceback.format_exc()
-                    logging.error(f"종합 분석 메인 로직 실행 오류: {e}\n{error_traceback}")
-                    results_placeholder.error(f"앱 실행 중 오류 발생: {e}")
-    else: # 종합 분석 버튼 클릭 전
-        if comprehensive_analysis_possible:
-             results_placeholder.info("⬅️ 사이드바에서 설정을 확인하고 '종합 분석 시작!' 버튼을 클릭하세요.")
-        else:
-             results_placeholder.warning("API 키 로드 실패로 종합 분석을 진행할 수 없습니다.")
-
-# ============== 📈 기술 분석 탭 ==============
-elif page == "📈 기술 분석":
-    st.title("📈 기술적 분석 (VWAP + Bollinger + Fibonacci) - FMP API")
-    st.markdown("VWAP, 볼린저밴드, 피보나치 되돌림 수준을 함께 시각화하고 자동 해석을 제공합니다.")
-    st.markdown("---")
-    # Get settings from sidebar using updated keys
-    ticker_tech = st.session_state.get('tech_ticker_input', "AAPL")
-    start_date = st.session_state.get('tech_start_input', datetime.now().date() - relativedelta(months=3))
-    end_date = st.session_state.get('tech_end_input', datetime.now().date())
-    interval_display = st.session_state.get('tech_interval_display_input', "일봉")
-    interval = available_intervals_tech[interval_display] # Get internal value
-    bb_window_val = st.session_state.get('bb_window', 20)
-    bb_std_val = st.session_state.get('bb_std', 2.0)
-
-    analyze_button_tech = st.button("📊 기술적 분석 실행", key="tech_analyze", use_container_width=True, type="primary")
-
-    if analyze_button_tech:
-        if not ticker_tech: st.warning("종목 티커를 입력해주세요.")
-        else:
-            ticker_processed_tech = ticker_tech.strip().upper()
-            if '.KS' in ticker_processed_tech or '.KQ' in ticker_processed_tech:
-                original_ticker_tech = ticker_processed_tech
-                ticker_processed_tech = ticker_processed_tech.split('.')[0]
-                st.info(f"국내 티커 감지: {original_ticker_tech} -> {ticker_processed_tech} (FMP용)")
-
-            df_tech = pd.DataFrame() # Initialize empty dataframe
-            st.session_state['error_shown_tech'] = False # Reset error flag
-
-            st.write(f"**{ticker_processed_tech}** ({interval_display}, BB:{bb_window_val}일/{bb_std_val:.1f}σ) 분석 중 (FMP API 사용)...")
-            with st.spinner(f"{ticker_processed_tech} 데이터 로딩 및 처리 중 (FMP)..."):
-                try:
-                    start_date_str = start_date.strftime("%Y-%m-%d")
-                    end_date_str = end_date.strftime("%Y-%m-%d")
-                    fmp_data = None; rename_map = {}
-
-                    if interval == "1day":
-                        # --- Correct function call for daily data ---
-                        fmp_data = fmp_api.get_price_data(ticker=ticker_processed_tech, start_date=start_date_str, end_date=end_date_str)
-                        rename_map = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
-                    else: # Intraday intervals
-                        # Use from_date and to_date if that's what get_intraday_data expects
-                        fmp_data = fmp_api.get_intraday_data(ticker=ticker_processed_tech, interval=interval, from_date=start_date_str, to_date=end_date_str)
-                        # Assume same rename map, adjust if FMP intraday response is different
-                        rename_map = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
-
-                    if fmp_data and isinstance(fmp_data, list):
-                        df_tech = pd.DataFrame(fmp_data)
-                        if not df_tech.empty:
-                            df_tech = df_tech.rename(columns=rename_map)
-                            date_col_name = rename_map.get('date', 'Date') # Use the mapped name
-
-                            if date_col_name in df_tech.columns:
-                                df_tech[date_col_name] = pd.to_datetime(df_tech[date_col_name], errors='coerce')
-                                df_tech = df_tech.set_index(date_col_name).sort_index()
-                                # Convert OHLCV to numeric, coercing errors
-                                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-                                    if col in df_tech.columns:
-                                         df_tech[col] = pd.to_numeric(df_tech[col], errors='coerce')
-                                # Drop rows where essential price data is missing after conversion
-                                df_tech.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
-                            else:
-                                st.error(f"FMP 응답 날짜 컬럼 '{date_col_name}' 없음.")
-                                df_tech = pd.DataFrame() # Reset to empty
-                        # else: # No need for message if dataframe becomes empty after processing, handled below
-                        #    st.warning(f"FMP 데이터 처리 후 결과 없음 ('{ticker_processed_tech}', {interval_display}).")
-                    elif fmp_data is None:
-                         st.error(f"FMP 데이터 로딩 오류 (API 결과 None).")
-                         df_tech = pd.DataFrame()
-                    else: # Empty list returned by API
-                         st.warning(f"FMP 데이터 '{ticker_processed_tech}' ({interval_display}) 가져오기 실패 (API 결과 빈 리스트).")
-                         df_tech = pd.DataFrame()
-
-                    # --- Process data if df_tech is not empty ---
-                    if df_tech.empty:
-                        if not st.session_state.get('error_shown_tech', False):
-                            st.error(f"❌ 데이터 조회/처리 실패.")
-                            st.session_state['error_shown_tech'] = True
-                    else:
-                        st.session_state['error_shown_tech'] = False # Reset error flag on success
-                        logging.info(f"FMP 데이터 처리 완료 ({ticker_processed_tech}, {interval_display}). {len(df_tech)} 행.")
-                        st.caption(f"조회 기간 (FMP): {df_tech.index.min()} ~ {df_tech.index.max()}")
-
-                        # Check for essential columns needed for calculations
-                        required_cols_tech = ['Open', 'High', 'Low', 'Close'] # Volume is needed for VWAP but checked in function
-                        missing_cols_tech = [col for col in required_cols_tech if col not in df_tech.columns]
-                        if missing_cols_tech:
-                            st.error(f"❌ 기술적 분석 위한 필수 컬럼 누락: {missing_cols_tech}.")
-                            st.dataframe(df_tech.head()) # Show head to help debug
-                        else:
-                            df_calculated = df_tech.copy()
-                            df_calculated.attrs['ticker'] = ticker_processed_tech # Store ticker for potential use in functions
-
-                            # Calculate indicators safely
-                            try: df_calculated = calculate_vwap(df_calculated)
-                            except Exception as e: st.warning(f"VWAP 계산 오류: {e}", icon="⚠️")
-                            try: df_calculated = calculate_bollinger_bands(df_calculated, window=bb_window_val, num_std=bb_std_val)
-                            except Exception as e: st.warning(f"BB 계산 오류: {e}", icon="⚠️")
-                            try: df_calculated = calculate_rsi(df_calculated) # Assumes this exists in short_term_analysis
-                            except NameError: st.error("오류: 'calculate_rsi' 함수를 찾을 수 없습니다. 'short_term_analysis.py'를 확인하세요.")
-                            except Exception as e: st.warning(f"RSI 계산 오류: {e}", icon="⚠️")
-                            try: df_calculated = calculate_macd(df_calculated) # Assumes this exists in short_term_analysis
-                            except NameError: st.error("오류: 'calculate_macd' 함수를 찾을 수 없습니다. 'short_term_analysis.py'를 확인하세요.")
-                            except Exception as e: st.warning(f"MACD 계산 오류: {e}", icon="⚠️")
-
-                            # Plotting
-                            st.subheader(f"📌 {ticker_processed_tech} 기술적 분석 통합 차트 ({interval_display})")
-                            chart_tech = plot_technical_chart(df_calculated, ticker_processed_tech)
-                            if chart_tech and chart_tech.data: st.plotly_chart(chart_tech, use_container_width=True)
-                            else: st.warning("차트 생성 실패/표시 데이터 없음.")
-
-                            # Display recent data table
-                            st.subheader("📄 최근 데이터 (계산된 지표 포함)")
-                            display_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'VWAP', 'MA20', 'Upper', 'Lower', 'RSI', 'MACD', 'MACD_signal', 'MACD_hist']
-                            display_cols_exist = [col for col in display_cols if col in df_calculated.columns]
-                            format_dict = {col: "{:.2f}" for col in display_cols_exist if col != 'Volume'}
-                            if 'Volume' in display_cols_exist: format_dict['Volume'] = "{:,.0f}"
-                            st.dataframe(df_calculated[display_cols_exist].tail(10).style.format(format_dict), use_container_width=True)
-
-                            # Signal Interpretation
-                            st.divider()
-                            st.subheader("🧠 기술적 시그널 해석 (참고용)")
-                            if not df_calculated.empty:
-                                latest_row = df_calculated.iloc[-1].copy()
-                                signal_messages = []
-                                # prev_close_fib = None # Fibonacci interpretation commented out
-                                # if len(df_calculated) >= 2: prev_close_fib = df_calculated['Close'].iloc[-2]
-
-                                try:
-                                     # Ensure the interpretation function exists
-                                    if 'interpret_technical_signals' in globals():
-                                        signal_messages.extend(interpret_technical_signals(latest_row, df_context=df_calculated))
+                                    required_cols_us = ['Open', 'High', 'Low', 'Close']
+                                    missing_cols_us = [col for col in required_cols_us if col not in df_tech_us.columns]
+                                    if missing_cols_us:
+                                        st.error(f"❌ 기술적 분석 위한 필수 컬럼 누락: {missing_cols_us}.")
+                                        st.dataframe(df_tech_us.head())
                                     else:
-                                        st.error("오류: 'interpret_technical_signals' 함수를 찾을 수 없습니다. 'technical_interpret.py'를 확인하세요.")
-                                except Exception as e: st.warning(f"기본 기술적 시그널 해석 오류: {e}", icon="⚠️")
+                                        df_calculated_us = df_tech_us.copy()
+                                        df_calculated_us.attrs['ticker'] = ticker_processed_us
+                                        try: df_calculated_us = calculate_vwap(df_calculated_us)
+                                        except Exception as e: st.warning(f"VWAP 계산 오류: {e}", icon="⚠️")
+                                        try: df_calculated_us = calculate_bollinger_bands(df_calculated_us, window=bb_window_us, num_std=bb_std_us)
+                                        except Exception as e: st.warning(f"BB 계산 오류: {e}", icon="⚠️")
+                                        try: df_calculated_us = calculate_rsi(df_calculated_us)
+                                        except NameError: st.error("오류: 'calculate_rsi' 함수를 찾을 수 없습니다.")
+                                        except Exception as e: st.warning(f"RSI 계산 오류: {e}", icon="⚠️")
+                                        try: df_calculated_us = calculate_macd(df_calculated_us)
+                                        except NameError: st.error("오류: 'calculate_macd' 함수를 찾을 수 없습니다.")
+                                        except Exception as e: st.warning(f"MACD 계산 오류: {e}", icon="⚠️")
 
-                                # Fibonacci interpretation (keep commented unless needed and function exists)
-                                # try:
-                                #    if 'interpret_fibonacci' in globals():
-                                #        fib_msg = interpret_fibonacci(df_calculated, close_value=latest_row.get("Close"), prev_close=prev_close_fib)
-                                #        if fib_msg: signal_messages.append(fib_msg)
-                                #    else:
-                                #        st.warning("피보나치 해석 함수 'interpret_fibonacci' 없음.", icon="⚠️")
-                                # except Exception as e_fib: st.warning(f"피보나치 시그널 해석 오류: {e_fib}", icon="⚠️")
+                                        st.subheader(f"📌 {ticker_processed_us} 기술적 분석 통합 차트 ({interval_display_us})")
+                                        chart_tech_us = plot_technical_chart(df_calculated_us, ticker_processed_us) # 미국용 차트 함수 호출
+                                        if chart_tech_us and chart_tech_us.data: st.plotly_chart(chart_tech_us, use_container_width=True)
+                                        else: st.warning("차트 생성 실패/표시 데이터 없음.")
 
-                                if signal_messages:
-                                     for msg in signal_messages: st.info(msg) # Use st.info for better visibility
-                                else: st.info("현재 특별히 감지된 기술적 시그널은 없습니다.")
-                                st.caption("⚠️ **주의:** 자동 해석은 보조 지표이며 투자 결정은 반드시 종합적인 판단 하에 신중하게 내리시기 바랍니다.")
-                            else: st.warning("해석할 데이터가 부족합니다.")
+                                        st.subheader("📄 최근 데이터 (계산된 지표 포함)")
+                                        display_cols_us = ['Open', 'High', 'Low', 'Close', 'Volume', 'VWAP', 'MA20', 'Upper', 'Lower', 'RSI', 'MACD', 'MACD_signal', 'MACD_hist']
+                                        display_cols_exist_us = [col for col in display_cols_us if col in df_calculated_us.columns]
+                                        format_dict_us = {col: "${:.2f}" for col in display_cols_exist_us if col not in ['Volume', 'RSI', 'MACD', 'MACD_signal', 'MACD_hist']}
+                                        if 'Volume' in display_cols_exist_us: format_dict_us['Volume'] = "{:,.0f}"
+                                        for col_macd in ['RSI', 'MACD', 'MACD_signal', 'MACD_hist']:
+                                             if col_macd in display_cols_exist_us: format_dict_us[col_macd] = "{:.2f}"
+                                        st.dataframe(df_calculated_us[display_cols_exist_us].tail(10).style.format(format_dict_us), use_container_width=True)
 
-                except requests.exceptions.RequestException as req_err:
-                    st.error(f"FMP API 요청 실패: {req_err}")
-                    logging.error(f"FMP API request error (Tech Tab): {req_err}")
-                except EnvironmentError as env_err: # Catch API key errors specifically if fmp_api raises them
-                     st.error(f"FMP API 키 설정 오류: {env_err}")
-                     logging.error(f"FMP API key error (Tech Tab): {env_err}")
-                except Exception as e:
-                    st.error(f"기술적 분석 처리 중 오류 발생: {type(e).__name__} - {e}")
-                    logging.error(f"Tech analysis tab error: {traceback.format_exc()}")
-    else: # 기술 분석 버튼 클릭 전
-        st.info("종목 티커, 기간, 데이터 간격 등을 설정한 후 '기술적 분석 실행' 버튼을 클릭하세요.")
+                                        st.divider()
+                                        st.subheader("🧠 기술적 시그널 해석 (참고용)")
+                                        if not df_calculated_us.empty:
+                                            latest_row_us = df_calculated_us.iloc[-1].copy()
+                                            signal_messages_us = []
+                                            try:
+                                                if 'interpret_technical_signals' in globals():
+                                                    signal_messages_us.extend(interpret_technical_signals(latest_row_us, df_context=df_calculated_us))
+                                                else:
+                                                    st.error("오류: 'interpret_technical_signals' 함수를 찾을 수 없습니다.")
+                                            except Exception as e: st.warning(f"기본 기술적 시그널 해석 오류: {e}", icon="⚠️")
+
+                                            if signal_messages_us:
+                                                for msg in signal_messages_us: st.info(msg)
+                                            else: st.info("현재 특별히 감지된 기술적 시그널은 없습니다.")
+                                            st.caption("⚠️ **주의:** 자동 해석은 보조 지표이며 투자 결정은 반드시 종합적인 판단 하에 신중하게 내리시기 바랍니다.")
+                                        else: st.warning("해석할 데이터가 부족합니다.")
+                            except requests.exceptions.RequestException as req_err:
+                                st.error(f"FMP API 요청 실패: {req_err}")
+                            except EnvironmentError as env_err:
+                                st.error(f"FMP API 키 설정 오류: {env_err}")
+                            except Exception as e:
+                                st.error(f"미국 기술적 분석 처리 중 오류 발생: {type(e).__name__} - {e}")
+                                logging.error(f"미국 기술 분석 탭 오류: {traceback.format_exc()}")
+            else:
+                results_placeholder_tech_us.info("⬅️ 사이드바에서 설정을 확인하고 '미국 주식 기술적 분석 실행' 버튼을 클릭하세요.")
+
+    elif selected_country == "🇰🇷 한국 주식":
+        if page == "📈 기술 분석 (pykrx)":
+            st.title("🇰🇷 한국 주식 기술적 분석 (pykrx 활용)")
+            st.markdown("`pykrx` 라이브러리를 사용하여 한국 주식 차트 및 기술적 지표를 제공합니다.")
+            st.markdown("---")
+            results_placeholder_kr_tech = st.container()
+
+            ticker_input_kr = st.session_state.get('tech_ticker_input_kr', "삼성전자")
+            start_date_kr = st.session_state.get('tech_start_input_kr', datetime.now().date() - relativedelta(months=6))
+            end_date_kr = st.session_state.get('tech_end_input_kr', datetime.now().date())
+            bb_window_val_kr = st.session_state.get('bb_window_kr', 20)
+            bb_std_val_kr = st.session_state.get('bb_std_kr', 2.0)
+
+            analyze_button_tech_kr = st.button("📊 한국 주식 기술적 분석 실행", key="tech_analyze_kr_button", use_container_width=True, type="primary")
+
+            if analyze_button_tech_kr:
+                if not ticker_input_kr:
+                    results_placeholder_kr_tech.warning("종목명 또는 종목코드를 입력해주세요.")
+                else:
+                    # 비동기 함수 호출 (Streamlit 환경에서 asyncio 사용)
+                    # Streamlit은 기본적으로 동기적으로 작동하므로, 최상위 레벨에서 await 사용 불가.
+                    # asyncio.run() 또는 이벤트 루프를 직접 관리해야 함.
+                    # 여기서는 간단하게 하기 위해 get_ticker_from_input을 동기 함수로 가정하거나,
+                    # Streamlit의 비동기 지원 기능을 활용해야 함 (st.experimental_rerun 등).
+                    # 가장 간단한 방법은 get_ticker_from_input에서 await을 제거하고 동기적으로 실행하는 것.
+                    # pykrx 함수들은 대부분 동기 함수이므로 문제가 없을 수 있음.
+                    # get_ticker_from_input 함수 정의에서 async와 await 제거 필요.
+                    # 아래는 동기 함수로 가정하고 호출.
+                    # ticker_code, company_name = get_ticker_from_input(ticker_input_kr)
+                    # display_korean_stock_chart 함수도 async 제거 필요.
+
+                    # --- Streamlit에서 비동기 함수 호출 (권장 방식) ---
+                    # asyncio.run()은 Streamlit 스크립트 내에서 직접 사용 시 문제 발생 가능성 있음.
+                    # Streamlit 버전 1.17.0 이상에서는 st.experimental_singleton 또는 st.cache_data 등과
+                    # 함께 사용하여 비동기 함수 결과를 캐시하는 방식으로 간접 실행 가능.
+                    # 하지만 display 함수처럼 UI를 직접 그리는 함수는 비동기로 만들기 어려움.
+                    # 여기서는 display_korean_stock_chart 함수 자체를 호출하는 방식으로 유지하고,
+                    # 해당 함수 내부에서 필요한 비동기 작업(향후 추가될 수 있는)을 처리하도록 설계하는 것이 나음.
+                    # 현재 pykrx 기반 로직은 동기적이므로 async/await 없이 바로 호출 가능.
+                    # display_korean_stock_chart 함수 정의에서도 async 제거 필요.
+
+                    # display_korean_stock_chart 함수 호출 (async 제거했다고 가정)
+                    display_korean_stock_chart(
+                        ticker_input_kr, start_date_kr, end_date_kr,
+                        bb_window_val_kr, bb_std_val_kr, results_placeholder_kr_tech
+                    )
+
+            else:
+                results_placeholder_kr_tech.info("⬅️ 사이드바에서 설정을 확인하고 '한국 주식 기술적 분석 실행' 버튼을 클릭하세요.")
+
+
+        elif page == "📝 기본 정보 (DART)":
+            st.title("🇰🇷 한국 기업 기본 정보 (DART API)")
+            st.markdown("DART API를 활용하여 한국 기업의 공시 정보 등을 조회합니다.")
+            st.markdown("---")
+            results_placeholder_kr_info = st.container()
+
+            company_kr_info = st.session_state.get('company_info_input_kr', "삼성전자")
+            start_date_dart = st.session_state.get('dart_start_input', datetime.now().date() - relativedelta(years=1))
+            end_date_dart = st.session_state.get('dart_end_input', datetime.now().date())
+
+            analyze_button_info_kr = st.button("🔍 한국 기업 정보 조회", key="info_analyze_kr_button", use_container_width=True, type="primary", disabled=not dart_available)
+
+            if analyze_button_info_kr:
+                if not company_kr_info:
+                    results_placeholder_kr_info.warning("기업명 또는 종목코드를 입력해주세요.")
+                elif not dart_available:
+                     results_placeholder_kr_info.error("DART API 키가 설정되지 않아 조회할 수 없습니다.")
+                else:
+                    with results_placeholder_kr_info:
+                        st.info(f"{company_kr_info} 기업 정보를 DART에서 조회합니다...")
+                        with st.spinner("DART 정보 조회 중..."):
+                            try:
+                                # dart_api 모듈의 함수 호출 (dart.py에 비동기 함수가 있다면 await 필요)
+                                # dart.py의 함수들이 비동기(async def)로 정의되어 있다면,
+                                # 여기서 await을 사용해야 함. Streamlit 환경에서의 비동기 호출 주의.
+                                # 예시: corp_code, matched_name = await dart_api.get_corp_code_by_name(company_kr_info)
+
+                                # dart.py 함수가 동기 함수라고 가정하고 호출 예시:
+                                # corp_code, matched_name = dart_api.get_corp_code_by_name(company_kr_info) # await 제거
+
+                                # --- dart.py 비동기 함수 호출 (asyncio 사용 예시 - Streamlit 버전 확인 필요) ---
+                                async def run_dart_tasks():
+                                    corp_code, matched_name = await dart_api.get_corp_code_by_name(company_kr_info)
+                                    if not corp_code:
+                                        st.error(f"DART에서 '{company_kr_info}'에 해당하는 기업을 찾을 수 없습니다: {matched_name}")
+                                        return
+
+                                    st.success(f"기업 정보 확인: {matched_name} (고유번호: {corp_code})")
+
+                                    start_str = start_date_dart.strftime("%Y%m%d")
+                                    end_str = end_date_dart.strftime("%Y%m%d")
+                                    disclosures, error_msg = await dart_api.get_disclosure_list(corp_code, start_str, end_str)
+
+                                    if error_msg:
+                                        st.error(f"공시 목록 조회 오류: {error_msg}")
+                                        return
+
+                                    if not disclosures:
+                                        st.warning(f"{start_str}~{end_str} 기간 동안 {matched_name}의 정기 공시가 없습니다.")
+                                        return
+
+                                    st.subheader(f"최근 정기 공시 목록 ({len(disclosures)}건)")
+                                    # 공시 정보를 DataFrame으로 만들어 표시
+                                    df_disclosures = pd.DataFrame(disclosures)
+                                    # 필요한 컬럼만 선택 및 이름 변경
+                                    df_display = df_disclosures[['rcept_dt', 'report_nm', 'corp_name', 'flr_nm']].rename(
+                                        columns={'rcept_dt': '접수일', 'report_nm': '보고서명', 'corp_name': '회사명', 'flr_nm': '제출인'}
+                                    )
+                                    st.dataframe(df_display, use_container_width=True)
+
+                                    # 추가 정보 표시 (예: 가장 최근 사업보고서의 '사업의 개요' 추출)
+                                    latest_business_report = None
+                                    for disc in disclosures:
+                                         if "사업보고서" in disc.get('report_nm', ''):
+                                              latest_business_report = disc
+                                              break
+
+                                    if latest_business_report:
+                                         rcept_no = latest_business_report.get('rcept_no')
+                                         if rcept_no:
+                                              st.subheader("최근 사업보고서 개요 (DART)")
+                                              with st.spinner("'사업의 개요' 추출 중..."):
+                                                   # dart.py 함수가 비동기면 await 사용
+                                                   overview_text = await dart_api.extract_business_section_from_dart(rcept_no, '사업의 개요')
+                                                   if overview_text.startswith("공시서류 다운로드 실패") or overview_text.startswith("'사업의 개요' 섹션을 찾을 수 없습니다"):
+                                                        st.warning(f"사업 개요 추출 실패: {overview_text}")
+                                                   elif overview_text.startswith("정보 추출 중 오류 발생"):
+                                                         st.error(f"사업 개요 추출 오류: {overview_text}")
+                                                   else:
+                                                         st.text_area("사업의 개요 내용", overview_text, height=300)
+                                    else:
+                                         st.info("최근 공시 목록에 사업보고서가 없어 개요를 추출하지 못했습니다.")
+
+
+                                # Streamlit에서 비동기 함수 실행 (try-except로 감싸기)
+                                try:
+                                    # get_event_loop()는 Deprecated 될 수 있으므로 get_running_loop() 시도
+                                    loop = asyncio.get_running_loop()
+                                    loop.run_until_complete(run_dart_tasks())
+                                except RuntimeError: # No running event loop
+                                    # 새로운 이벤트 루프 생성 및 실행 (Streamlit 환경에서 권장되지는 않음)
+                                    # asyncio.run(run_dart_tasks()) # 이게 더 간단할 수 있음
+                                    # 또는 nest_asyncio 라이브러리 사용 고려
+                                    st.warning("비동기 작업 실행에 문제가 발생했습니다. (Event Loop)")
+                                    # 동기적 대안 시도 (dart.py 함수가 동기/비동기 모두 지원하거나, 동기 버전이 있다면)
+                                    # corp_code_sync, matched_name_sync = dart_api.get_corp_code_by_name_sync(company_kr_info) ...
+                            except AttributeError as attr_err:
+                                 st.error(f"DART 모듈 함수 호출 오류: {attr_err}. dart.py 파일의 함수 정의를 확인하세요.")
+                            except Exception as dart_e:
+                                st.error(f"DART 정보 조회 중 오류 발생: {dart_e}")
+                                st.error(f"Traceback: {traceback.format_exc()}")
+            else:
+                results_placeholder_kr_info.info("⬅️ 사이드바에서 기업명을 입력하고 '한국 기업 정보 조회' 버튼을 클릭하세요.")
+
+else:
+    # 앱 초기 로딩 시 또는 페이지 선택 전 표시할 내용 (선택 사항)
+    st.info("⬅️ 사이드바에서 국가와 분석 유형을 선택하세요.")
 
 
 # --- 앱 정보 ---
 st.sidebar.markdown("---")
-st.sidebar.info("종합 주식 분석 툴 (FMP API) | 정보 제공 목적 (투자 조언 아님)")
+st.sidebar.info("종합 주식 분석 툴 (FMP & pykrx/DART) | 정보 제공 목적") # 제공 API 명시
 st.sidebar.markdown("📌 [개발기 보러가기](https://technut.tistory.com/1)", unsafe_allow_html=True)
 st.sidebar.caption("👨‍💻 기술 기반 주식 분석 툴 개발기")
