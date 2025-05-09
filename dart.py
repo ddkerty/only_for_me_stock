@@ -12,12 +12,11 @@ import traceback
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-
 load_dotenv()
 # 상수 정의
-# API 설정
-API_KEY = os.environ.get("DART_API_KEY")  # 환경 변수에서 API 키 로드, 없으면 기본값 사용'
-if not API_KEY and hasattr(st, 'secrets'): # 2. 환경 변수 없고 secrets 사용 가능하면
+# --- API 키 로드 수정 ---
+API_KEY = os.getenv("DART_API_KEY") # 1. 환경 변수 먼저 확인
+if not API_KEY and hasattr(st, 'secrets'): # 2. 환경 변수에 없고, secrets 사용 가능하면
     API_KEY = st.secrets.get("DART_API_KEY") # 3. Streamlit secrets에서 직접 읽기
 BASE_URL = "https://opendart.fss.or.kr/api"
 
