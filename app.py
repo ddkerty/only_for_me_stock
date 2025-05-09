@@ -30,17 +30,6 @@ except ImportError:
     st.error("pykrx 라이브러리를 찾을 수 없습니다. 'pip install pykrx'로 설치해주세요.")
     st.stop()
 
-if 'dart_api' in globals() and dart_api:
-    st.sidebar.write(f"DEBUG in app.py: dart_api.API_KEY is '{dart_api.API_KEY}'") # 디버깅 출력
-else:
-    st.sidebar.write("DEBUG in app.py: dart_api module not loaded or is None.")
-
-dart_available = False
-if 'dart_api' in globals() and dart_api:
-    try:
-        if getattr(dart_api, 'API_KEY', None):
-             dart_available = True
-             
 # --- FMP API 및 분석 모듈 임포트 ---
 try:
     import fmp_api # FMP API 래퍼 모듈
