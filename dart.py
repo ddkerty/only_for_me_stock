@@ -742,7 +742,7 @@ async def get_original_document(rcept_no: str) -> Tuple[str, Optional[bytes]]:
 
 
 # MCP 도구
-@mcp.tool()
+#@mcp.tool()
 async def search_disclosure(
     company_name: str, 
     start_date: str, 
@@ -935,7 +935,7 @@ async def search_disclosure(
     return result.strip()
 
 
-@mcp.tool()
+#@mcp.tool()
 async def search_detailed_financial_data(
     company_name: str,
     start_date: str,
@@ -1128,7 +1128,7 @@ async def search_detailed_financial_data(
     return result.strip()
 
 
-@mcp.tool()
+#@mcp.tool()
 async def search_business_information(
     company_name: str,
     start_date: str,
@@ -1265,7 +1265,7 @@ async def search_business_information(
     return result
 
 
-@mcp.tool()
+#@mcp.tool()
 async def get_current_date(
     ctx: Context = None
 ) -> str:
@@ -1371,7 +1371,7 @@ def get_statement_name(sj_div: str) -> str:
     return div_to_name.get(sj_div, "알 수 없는 재무제표")
 
 
-@mcp.tool()
+#@mcp.tool()
 async def search_json_financial_data(
     company_name: str,
     bsns_year: str,
