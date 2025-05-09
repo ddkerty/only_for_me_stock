@@ -49,9 +49,11 @@ except ImportError as e:
 # --- DART API 모듈 임포트 (한국 기업 기본 정보용) ---
 try:
     import dart as dart_api # dart.py 파일을 dart_api 라는 이름으로 임포트
+    # dart.py가 성공적으로 임포트되면, 실제 dart.py 내부의 API_KEY 변수는 사용하지 않고,
+    # app.py에서 직접 st.secrets를 확인하여 dart_available을 설정합니다.
 except ImportError:
     st.warning("dart.py 파일을 찾을 수 없습니다. '한국 기업 기본 정보' 기능이 제한될 수 있습니다.")
-    dart_api = None # dart_api 객체를 None으로 설정하여 오류 방지
+    DART_API = None # dart_api 객체를 None으로 설정하여 오류 방지
 
 # --- 기술 분석 지표 계산 함수들 (수정됨) ---
 def calculate_vwap(df):
@@ -446,15 +448,20 @@ comprehensive_analysis_possible = fmp_key_loaded
 
 # --- DART API 키 확인 ---
 dart_available = False
-if 'dart_api' in globals() and dart_api:
-    try:
-        if getattr(dart_api, 'API_KEY', None): # API_KEY 존재 및 값 확인
-             dart_available = True
-             logging.info("DART API 키 확인됨 (환경 변수).")
-        else:
-             logging.warning("DART API 키가 환경 변수에 설정되지 않았습니다.")
-    except Exception as e:
-         logging.warning(f"DART API 키 확인 중 오류: {e}")
+if dart_api: # dart.py 모듈이 성공적으로 임포트 되었는지 먼저 확인
+    if hasattr(st, 'secrets') and "DART_API_KEY" in st.secrets and st.secrets.DART_API_KEY:
+        # Streamlit Secrets에 DART_API_KEY가 있고, 그 값이 비어있지 않은 경우
+        dart_available = True
+        logging.info("DART API 키 확인됨 (Streamlit Secrets).")
+        # 이 경우, dart.py 내부의 API_KEY 변수에도 이 값이 반영되도록 할 수 있지만,
+        # dart.py 함수들이 API_KEY를 직접 참조하므로, dart.py 내의 API_KEY 로드 로직도 중요합니다.
+        # dart.py의 API_KEY 로드 로직이 st.secrets을 포함하도록 이전 답변처럼 수정되어 있어야 합니다.
+    elif os.getenv("DART_API_KEY"):
+        # 환경 변수에 DART_API_KEY가 설정된 경우 (로컬 .env 등)
+        dart_available = True
+        logging.info("DART API 키 확인됨 (환경 변수).")
+    else:
+        logging.warning("DART API 키가 Streamlit Secrets 또는 환경 변수에 설정되지 않았습니다.")
 else:
     logging.warning("dart.py 모듈 로드 실패. DART 관련 기능 사용 불가.")
 
