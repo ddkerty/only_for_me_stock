@@ -24,6 +24,8 @@ import warnings
 import re
 import pandas_ta as ta
 import streamlit as st # caching decorator 사용 위해 임포트
+from fmp_api import get_price_data as get_stock_data
+
 
 # Import specific FMP functions for clarity
 from fmp_api import (
