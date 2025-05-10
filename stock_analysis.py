@@ -67,6 +67,45 @@ except Exception as e:
 # get_fundamental_data, get_operating_margin_trend, get_roe_trend, get_debt_to_equity_trend,
 # get_current_ratio_trend, plot_stock_chart, get_news_sentiment are assumed to be the same as in the original file)
 # For brevity, I will skip them here and jump to the modified functions.
+# 오류 수정된 get_stock_data 사용 예시 (stock_analysis.py 내 적용용)
+
+def safe_load_fmp_price_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    FMP API에서 가격 데이터를 불러와 안전하게 DataFrame으로 변환하고 유효성 검사를 수행합니다.
+
+    Args:
+        ticker (str): 종목 티커
+        start_date (str): 시작일 (YYYY-MM-DD)
+        end_date (str): 종료일 (YYYY-MM-DD)
+
+    Returns:
+        pd.DataFrame: 정제된 가격 데이터프레임 또는 빈 데이터프레임 (오류 시)
+    """
+    try:
+        raw_data = get_price_data(ticker=ticker, start_date=start_date, end_date=end_date)
+        if raw_data is None or not isinstance(raw_data, list) or len(raw_data) == 0:
+            logging.error(f"{ticker}: get_price_data() 결과 없음 또는 형식 오류")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(raw_data)
+        required_cols = ['date', 'close']
+        if not all(col in df.columns for col in required_cols):
+            logging.error(f"{ticker}: 필수 컬럼 누락: {required_cols}")
+            return pd.DataFrame()
+
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df = df.rename(columns={
+            'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
+        })
+        df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].dropna()
+        df.set_index('Date', inplace=True)
+        df.sort_index(inplace=True)
+        return df
+
+    except Exception as e:
+        logging.error(f"{ticker}: 가격 데이터 로드 실패: {e}")
+        return pd.DataFrame()
+
 
 # --- Prophet Forecasting (FMP Macro Data 적용) ---
 def run_prophet_forecast(ticker, start_date, end_date=None, forecast_days=30, changepoint_prior_scale=0.05, avg_price=None): # MODIFIED: Added avg_price
@@ -75,7 +114,7 @@ def run_prophet_forecast(ticker, start_date, end_date=None, forecast_days=30, ch
     if end_date is None: end_date = datetime.today().strftime("%Y-%m-%d")
 
     # 1. 초기 주가 데이터 로딩 (FMP 사용)
-    df_stock_initial = get_stock_data(ticker, start_date=start_date, end_date=end_date)
+    df_stock_initial = safe_load_fmp_price_data(ticker, start_date=start_date, end_date=end_date)
     if df_stock_initial is None or df_stock_initial.empty:
         logging.error(f"{ticker}: Prophet 예측 위한 FMP 주가 데이터 로드 실패.")
         return None, None, None, None # 4 Nones 반환
