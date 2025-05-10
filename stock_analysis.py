@@ -381,8 +381,9 @@ def analyze_stock(ticker, analysis_period_years=2, forecast_days=30, num_trend_p
         logging.error(f"날짜 설정 오류: {e}")
         return {"error": f"날짜 설정 오류: {e}"}
 
-    df_stock_full = get_stock_data(ticker, start_date=start_date_str, end_date=end_date_str)
-    stock_data_valid = df_stock_full is not None and not df_stock_full.empty and 'Close' in df_stock_full.columns
+    df_stock_full = safe_load_fmp_price_data(ticker, start_date=start_date_str, end_date=end_date_str)
+    stock_data_valid = not df_stock_full.empty and 'Close' in df_stock_full.columns
+
     current_price_str = "N/A"; data_points_count = 0
     if stock_data_valid:
         last_close = df_stock_full['Close'].dropna().iloc[-1] if not df_stock_full['Close'].dropna().empty else None
