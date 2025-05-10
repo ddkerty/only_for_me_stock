@@ -294,7 +294,7 @@ def run_cached_analysis(ticker, fred_key, years, days, num_trend_periods, change
     try:
         analysis_results = sa.analyze_stock(
             ticker,
-            fred_key=fred_key, # FRED 키 전달 (stock_analysis.py 가 아직 사용)
+            #fred_key=fred_key, # FRED 키 전달 (stock_analysis.py 가 아직 사용)
             analysis_period_years=years,
             forecast_days=days,
             num_trend_periods=num_trend_periods,
@@ -340,7 +340,7 @@ if page == "📊 종합 분석":
                     # --- run_cached_analysis 호출 (news_key 없이, fred_key는 전달) ---
                     results = run_cached_analysis(
                         ticker_proc,
-                        FRED_API_KEY, # FRED 키 전달
+                        #FRED_API_KEY, # FRED 키 전달
                         years, days, periods, cp_prior
                     )
 
