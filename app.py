@@ -289,7 +289,7 @@ with st.sidebar:
 
 # --- 캐시된 종합 분석 함수 (기존과 동일, news_key 인자 제거됨) ---
 @st.cache_data(ttl=timedelta(hours=1))
-def run_cached_analysis(ticker, fred_key, years, days, num_trend_periods, changepoint_prior_scale):
+def run_cached_analysis(ticker,  years, days, num_trend_periods, changepoint_prior_scale):
     logging.info(f"종합 분석 실행: {ticker}, {years}년, {days}일, {num_trend_periods}분기, cp_prior={changepoint_prior_scale}")
     try:
         analysis_results = sa.analyze_stock(
